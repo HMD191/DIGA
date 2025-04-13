@@ -2,7 +2,7 @@ defaults:
   # - test_list: cityscapes # idd # crosscity # cityscapes # mapillary # cityscapes, bdd, mapillary
   - test_list: cityscapes
 _target_: src.datamodules.ttda_datamodule.Sim2RealSegmentationDataModule
-data_dir: kaggle/input/cityscape-diga
+data_dir: /kaggle/input/cityscape-diga
 batch_size: 1 # 64
 num_workers: 1
 pin_memory: False
