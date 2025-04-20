@@ -301,6 +301,12 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 
 		exponential_average_factor = 0.0
 
+		if not hasattr(self, 'cumulative_mean'):
+			self.register_buffer('cumulative_mean', torch.zeros_like(self.running_mean))
+			self.register_buffer('cumulative_var', torch.zeros_like(self.running_var))
+			self.register_buffer('batch_count', torch.tensor(0.))
+
+		# self.training = false because we are in test phase
 		if self.training and self.track_running_stats:
 			if self.num_batches_tracked is not None:
 				# self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
@@ -332,8 +338,24 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 				self.running_var = exponential_average_factor * var * n / (n - 1)\
 					+ (1 - exponential_average_factor) * self.running_var
 		else:
-			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-			var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+			with torch.no_grad():
+				self.batch_count += 1
+
+				self.cumulative_mean = (self.cumulative_mean * (self.batch_count - 1) + mean_cur) / self.batch_count
+				self.cumulative_var  = (self.cumulative_var  * (self.batch_count - 1) + var_cur ) / self.batch_count
+
+				# delta_mean = mean_cur - self.cumulative_mean
+				# self.cumulative_mean += delta_mean / self.batch_count
+
+				# delta_var = var_cur - self.cumulative_var
+				# self.cumulative_var += delta_var / self.batch_count
+
+			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * self.cumulative_mean
+			var = self.lambda_ * self.running_var + (1-self.lambda_) * self.cumulative_var
+
+			# with torch.no_grad():
+			# 	self.running_mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
+			# 	self.running_var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
 		# normal train -> update running mean, var. use current mean, var
 		# target 
 		# eval -> use self.running_mean, self.running_var
@@ -353,7 +375,6 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 		self.load_state_dict(bn.state_dict())
 		self.lambda_ = torch.tensor(0.)
 		return self
-
 class SIFABatchNorm2dTrainable(SIFABatchNorm2d):
 	def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
 				 affine=True, track_running_stats=True):
