@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 from torch.utils import data
 
 class BaseDataset(data.Dataset):
@@ -62,6 +62,8 @@ def _load_img(file, size, interpolation, rgb):
     img = Image.open(file)
     if rgb:
         img = img.convert('RGB')
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(0.8) # Adjust contrast
     if size is not None:
         img = img.resize(size, interpolation)
     return np.asarray(img, np.float32)

@@ -3,6 +3,7 @@ from curses import doupdate, halfdelay
 from genericpath import exists
 from typing import Any, List
 from pathlib import Path
+from collections import deque
 
 import torch
 from pytorch_lightning import LightningModule
@@ -193,6 +194,38 @@ class SegmentationMetric(Metric):
 		mean_iou = torch.nanmean(ious) * 100.0
 		return mean_iou # TODO add other metrics
 	
+	def test_compute(self):
+		ious = self._per_class_iou(self.hist)
+		mean_iou = torch.nanmean(ious) * 100.0
+
+		# this to test the ious
+		import csv
+		import os
+		csv_file = "ious_log.csv"
+		write_header = not os.path.exists(csv_file)
+
+		with open(csv_file, mode="a", newline="") as f:
+			writer = csv.writer(f)
+
+			if write_header:
+				header = [f"class_{i}_iou" for i in range(len(ious))] + ["mean_iou"]
+				writer.writerow(header)
+
+			writer.writerow(ious.tolist() + [mean_iou.item()])
+
+		return mean_iou # TODO add other metrics
+	
+	def test_compute_last_hint(self, get_average = True):
+		""" Compute the metric."""
+		ious = self._per_class_iou(self.last_hist)
+
+		if get_average == False:
+			return ious
+		
+		print("ious: ", ious)
+		mean_iou = torch.nanmean(ious) * 100.0
+		return mean_iou
+
 	def compute_iou(self, type="default"):
 		""" Compute the metric."""
 		ious = self._per_class_iou(self.hist)
@@ -296,11 +329,65 @@ class CustomBatchNorm2d(nn.BatchNorm2d):
 		return self
 
 class SIFABatchNorm2d(CustomBatchNorm2d):
+	def idea_update_high_confidence_batches(self, mean_cur, var_cur):
+		CONFIDENCE_THRESHOLD = 0.9
+		NUMBER_CLASSES_CONF_THRESHOLD = 8
+		self.batch_count += 1
+
+		preds = self.__class__._preds  # (B, C, H, W)
+
+		if preds is not None:
+			with torch.no_grad():
+				# Compute softmax confidence
+				preds = torch.nan_to_num(preds, nan=0.0, posinf=1e4, neginf=-1e4)
+				max_class_conf = preds.amax(dim=(0, 2, 3), keepdim=False)# (C,)
+				count_classes_conf = (max_class_conf >= CONFIDENCE_THRESHOLD).sum()
+				
+				# confidence, _ = probs.max(dim=1)  # (B, H, W), max prob per pixel
+				# mean_conf = max_class_conf.mean()
+
+
+				# Save to file
+				# with open("class_probability_max.txt", "a") as f:
+				# 	f.write(f"Batch {self.batch_count}:\n")
+				# 	for i, conf in enumerate(max_class_conf):
+				# 		f.write(f"  Class {i}: {conf.item():.4f}\n")
+				# 		# print("mean_conf: ", mean_conf)
+
+				# if mean_conf >= CONFIDENCE_THRESHOLD:
+				if count_classes_conf >= NUMBER_CLASSES_CONF_THRESHOLD:
+					# Use input to extract mean and var of the whole batch
+					if self._pre_input.size(0) > 1:
+						mean_sel = (self._pre_input[:1].mean([0, 2, 3]) + self._pre_input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
+						var_sel = (self._pre_input[:1].var([0, 2, 3], unbiased=False) + self._pre_input[1:].var([0, 2, 3], unbiased=False)) / 2
+					else:
+						mean_sel = self._pre_input.mean([0, 2, 3])
+						var_sel = self._pre_input.var([0, 2, 3], unbiased=False)
+
+					self.mean_window.append(mean_sel)
+					self.var_window.append(var_sel)
+
+		with torch.no_grad():
+			self.mean_window.append(mean_cur)
+			self.var_window.append(var_cur)
+			self.cumulative_mean = torch.stack(list(self.mean_window)).mean(dim=0)
+			self.cumulative_var = torch.stack(list(self.var_window)).mean(dim=0)
+			self.mean_window.pop() 
+			self.var_window.pop()
+
 	def forward(self, input):
 		self._check_input_dim(input)
 
 		exponential_average_factor = 0.0
 
+		if not hasattr(self, 'cumulative_mean'):
+			self.mean_window = deque(maxlen=20)
+			self.var_window = deque(maxlen=20)
+			self.register_buffer('cumulative_mean', torch.zeros_like(self.running_mean))
+			self.register_buffer('cumulative_var', torch.zeros_like(self.running_var))
+			self.register_buffer('batch_count', torch.tensor(0.))
+
+		# self.training = false because we are in test phase
 		if self.training and self.track_running_stats:
 			if self.num_batches_tracked is not None:
 				# self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
@@ -332,8 +419,11 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 				self.running_var = exponential_average_factor * var * n / (n - 1)\
 					+ (1 - exponential_average_factor) * self.running_var
 		else:
-			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-			var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+			self.idea_update_high_confidence_batches(mean_cur, var_cur)
+
+		mean = self.running_mean*self.lambda_ + (1-self.lambda_) * self.cumulative_mean
+		var = self.running_var*self.lambda_ + (1-self.lambda_) * self.cumulative_var
+		self._pre_input = input
 		# normal train -> update running mean, var. use current mean, var
 		# target 
 		# eval -> use self.running_mean, self.running_var
@@ -344,6 +434,16 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 
 		return input
 	
+	_preds = None  # <--- static variable
+	_pre_input = None
+
+	@classmethod
+	def set_preds(cls, logits):
+			cls._preds = logits
+	@classmethod
+	def clear_preds(cls):
+			cls._preds = None
+
 	def from_bn(self, bn):
 		self.__init__(
 			bn.num_features, bn.eps, bn.momentum,
@@ -1615,9 +1715,18 @@ class DIGA(LightningModule):
 		loss, preds, targets, info = self.step(batch)
 		# log test metrics
 		acc = self.test_acc[dataloader_idx](preds, targets)
+
+		SIFABatchNorm2d.set_preds(preds)
+
 		self.log(f"test/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
 		self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
 		self.test_step_global += 1
+
+		if self.test_step_global % 10 == 0:
+			# call compute() to get the current accuracy
+			print(f"test_step_global: {self.test_step_global}, batch_idx: {batch_idx}")
+			self.test_acc[dataloader_idx].test_compute()
+
 		return {"loss": loss}
 	
 	def forward_and_adapt(self, pair):
@@ -1697,8 +1806,8 @@ class DIGA(LightningModule):
 			outputs, 
 			threshold=cfg.confidence_threshold, 
 		)
-		proto, exists_flag = self.cal_proto(feature, proto_label)
 		# init or update mean prototypes
+		proto, exists_flag = self.cal_proto(feature, proto_label)
 		if not hasattr(self, "classifier_running_proto"):
 			self.classifier_running_proto, self.classifier_running_proto_exists_flag = proto, exists_flag
 		else:
@@ -1762,6 +1871,7 @@ class DIGA(LightningModule):
 				classifier_proto_exists_flag[i] = 1
 			else:
 				classifier_proto[i] = (1-rho) * classifier_proto[i] + rho * proto[i]
+				#rho = 0.1
 		return classifier_proto, classifier_proto_exists_flag 
 
 	@torch.no_grad()
@@ -1802,6 +1912,8 @@ class DIGA(LightningModule):
 				continue
 			with_flag[i] = 1
 			proto[i] = feature.permute((1, 0, 2, 3)).flatten(1).permute((1,0))[masks].mean(0)
+		
+		# each element in proto saves the mean feature of each class
 		return proto, with_flag
 	
 	# utils operation

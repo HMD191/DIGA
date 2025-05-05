@@ -170,3 +170,8 @@ sync_log.txt
 /mmsegmentation
 notebooks/tmp.ipynb
 /notebooks/*
+
+# test-phase
+class_probability_max_unique.txt
+count_high_score_class.py 
+unique_batch.py
