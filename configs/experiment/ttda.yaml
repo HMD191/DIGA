@@ -17,7 +17,7 @@ defaults:
 
 tags: ["ttda", "coding"]
 task_name: "test-time-DA"
-# seed: 55555
+seed: 55555
 
 trainer:
   min_epochs: 1
