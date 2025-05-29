@@ -18,6 +18,12 @@ class GTA5DataSet(BaseDataset):
 				 max_iters=None, crop_size=(321, 321), mean=(128, 128, 128)):
 		super().__init__(root, list_path, set, max_iters, crop_size, None, mean)
 
+		self.random_mirror = True
+		self.random_crop = False
+		self.resize = True
+		self.gaussian_blur = True
+		self.crop_size = self.image_size
+
 		# map to cityscape's ids
 		self.id_to_trainid = {7: 0, 8: 1, 11: 2, 12: 3, 13: 4, 17: 5,
 							  19: 6, 20: 7, 21: 8, 22: 9, 23: 10, 24: 11, 25: 12,
@@ -49,11 +55,6 @@ class GTA5DataSet(BaseDataset):
 		:param gt_image: PIL input gt_image
 		:return:
 		'''
-		self.random_mirror = True
-		self.random_crop = False
-		self.resize = True
-		self.gaussian_blur = True
-		self.crop_size = self.image_size
 		if self.random_mirror:
 			# random mirror
 			if random.random() < 0.5:

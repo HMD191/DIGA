@@ -43,10 +43,12 @@ class GTA5DataSet(GTA5DataSet_):
 	DATASET_DIR_NAME = 'GTA5'
 	CORP_SIZE = (1280,640) # TODO not sure about original size
 	def __init__(self, root, set):
-		self.data_dir = dataset_dir = root + '/{}/'.format(self.DATASET_DIR_NAME)
-		info_dir = dataset_dir + '/advent_list/'
+		self.data_dir = dataset_dir = "/kaggle/input/gta5-dataset/GTA5" + '/{}/'.format(self.DATASET_DIR_NAME)
+		info_dir = "/kaggle/working/DIGA/src/utils/advent_list_lib/GTA5" + '/advent_list/'
 		info_path = info_dir + '/info.json'
 		list_path_to_format = info_dir + '/{}.txt'
+		print("self.data_dir:", self.data_dir)
+		print("list_path_to_format:", list_path_to_format)
 		super().__init__(
 			self.data_dir, list_path_to_format, set,
 			crop_size=self.CORP_SIZE if hasattr(self, 'CORP_SIZE') else None,
