@@ -4,6 +4,18 @@ _target_: src.models.ttda_module.DIGA
 cfg:
   bn_lambda: 0.8
   proto_lambda: 0.8
-  fusion_lambda: 0.8
+  fusion_lambda: 0.8 # best
   confidence_threshold: 0.9
-  proto_rho: 0.1
+  number_of_prototypes: 0.7 # best
+  proto_rho: 0.4 # best
+  lambda_dot: 0.9
+  memory_bank_size: 32
+optimizer:
+  lr: 0.001
+  momentum: 0.9
+  weight_decay: 0.0005
+#   momentum: 0.9 # TODO only bn layer
+# tt_lr_scheduler:
+#   _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+#   T_max: 1000
+#   eta_min: 1e-6

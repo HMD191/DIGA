@@ -10,7 +10,6 @@ from src import utils
 
 log = utils.get_pylogger(__name__)
 
-
 @utils.task_wrapper
 def train(cfg: DictConfig) -> Tuple[dict, dict]:
     """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
@@ -32,7 +31,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
     log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datamodule)
-
+    print('datamodule instantiated')
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.model, dataset_info=datamodule.info)
 

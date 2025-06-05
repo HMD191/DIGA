@@ -24,6 +24,7 @@ import wandb
 import random
 from tqdm import tqdm
 import time 
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger('lightning')
 logging.getLogger('PIL').setLevel(logging.INFO)
@@ -295,10 +296,102 @@ class CustomBatchNorm2d(nn.BatchNorm2d):
 		self.load_state_dict(bn.state_dict())
 		return self
 
+class FeatureMemory(nn.Module):
+	"""A class to manage feature memory bank with proper tensor handling."""
+	def __init__(self, max_size: int):
+		super().__init__()
+		self.max_size = max_size
+		self.register_buffer('memory', torch.zeros(0))
+		
+	def add(self, tensor: torch.Tensor):
+		"""Add a tensor to memory with proper cloning and device handling."""
+		# Clone and detach the tensor
+		tensor = tensor.detach().clone()
+		
+		# Add to memory
+		if self.memory.numel() == 0:
+			# Initialize memory with the first tensor
+			self.memory = tensor.unsqueeze(0)
+		else:
+			# Ensure both tensors have the same number of dimensions
+			if self.memory.dim() == 1:
+				self.memory = self.memory.unsqueeze(0)
+			if tensor.dim() == 1:
+				tensor = tensor.unsqueeze(0)
+			self.memory = torch.cat([self.memory, tensor], dim=0)
+			
+	def remove(self, number: int, status: int = 0):
+		"""Remove specified number of entries from memory bank.
+		
+		Args:
+			number: Number of entries to remove
+			status: Removal strategy (0: random, 1: oldest entries)
+		"""
+		if self.memory.numel() == 0:
+			return
+			
+		if status == 0:  # Random removal
+			# Generate random indices
+			indices = torch.randperm(len(self))[:number].tolist()
+			# Sort indices in descending order to avoid index shifting
+			for idx in sorted(indices, reverse=True):
+				self.memory = torch.cat([self.memory[:idx], self.memory[idx+1:]])
+		else:  # status == 1, Remove oldest entries
+			# Remove oldest entries
+			self.memory = self.memory[number:]
+			
+	def get_stats(self) -> torch.Tensor:
+		"""Get statistics (mean) from memory bank."""
+		if self.memory.numel() == 0:
+			return None
+			
+		return self.memory.mean(dim=0)
+		
+	def clear(self):
+		"""Clear the memory bank."""
+		self.memory = torch.zeros(0, device=self.memory.device)
+		torch.cuda.empty_cache()
+		
+	def __len__(self):
+		return self.memory.size(0) if self.memory.numel() > 0 else 0
+
 class SIFABatchNorm2d(CustomBatchNorm2d):
+	def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
+				 affine=True, track_running_stats=True):
+		super().__init__(num_features, eps, momentum, affine, track_running_stats)
+
+	def update_memory_bank(self, input):
+		"""Update memory banks with new batch statistics.
+		
+		Args:
+			input: [B, C, H, W]
+		"""
+		batch_size = input.size(0)
+		# Remove if needed
+		if (len(self.mean_memory) + batch_size > self.memory_bank_size):
+			need_remove = len(self.mean_memory) + batch_size - self.memory_bank_size
+			self.mean_memory.remove(need_remove, status=0)
+			self.var_memory.remove(need_remove, status=0)
+		
+		# Calculate mean and var for each image in the batch
+		for i in range(batch_size):
+			# Calculate mean and var for this image
+			img_mean = input[i].mean([1, 2])  # [C]
+			img_var = input[i].var([1, 2], unbiased=False)  # [C]
+			# Add to memory banks
+			self.mean_memory.add(img_mean)
+			self.var_memory.add(img_var)
+
+	def get_memory_bank_stats(self):
+		"""Calculate mean and variance from memory bank."""
+		mean_cur = self.mean_memory.get_stats()
+		var_cur = self.var_memory.get_stats()
+			
+		return mean_cur, var_cur
+
 	def forward(self, input):
 		self._check_input_dim(input)
-
+		
 		exponential_average_factor = 0.0
 
 		if self.training and self.track_running_stats:
@@ -321,6 +414,14 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 		else:
 			mean_cur = input.mean([0, 2, 3])
 			var_cur = input.var([0, 2, 3], unbiased=False)
+		
+		if not hasattr(self, 'mean_memory'):
+			self.mean_memory = FeatureMemory(self.memory_bank_size) 
+			self.var_memory = FeatureMemory(self.memory_bank_size) 
+			
+		# Update memory banks
+		self.update_memory_bank(input)
+		mean_cur, var_cur = self.get_memory_bank_stats()
 		# calculate running estimates
 		n = input.numel() / input.size(1)
 		if self.training:
@@ -328,12 +429,11 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 			with torch.no_grad():
 				self.running_mean = exponential_average_factor * mean\
 					+ (1 - exponential_average_factor) * self.running_mean
-				# update running_var with unbiased var
 				self.running_var = exponential_average_factor * var * n / (n - 1)\
 					+ (1 - exponential_average_factor) * self.running_var
-		else:
-			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-			var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+	
+		mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
+		var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
 		# normal train -> update running mean, var. use current mean, var
 		# target 
 		# eval -> use self.running_mean, self.running_var
@@ -341,7 +441,6 @@ class SIFABatchNorm2d(CustomBatchNorm2d):
 		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
 		if self.affine:
 			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
-
 		return input
 	
 	def from_bn(self, bn):
@@ -603,7 +702,7 @@ class SIFAEvalUpdateBatchNorm2d(EvalUpdateBatchNorm2d):
 			# var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
 			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
 			var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
-
+		
 		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
 		if self.affine:
 			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
@@ -1399,25 +1498,15 @@ class SegmentationBasicModule(LightningModule):
 		loss, info = self.criterion(outputs, y)
 		return loss, outputs, y, info
 
-	def training_step(self, batch: Any, batch_idx: int):
+	# dataloader_idx = 0 
+	def training_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
 		x, y, shape_, name_ = batch
 		loss, preds, targets, info = self.step(batch)
-
 		# log train metrics
-		acc = self.train_acc(preds, targets)
+		acc = self.train_acc[dataloader_idx](preds, targets)
 		self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 		self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
-		# if batch_idx % self.hparams.image_log_interval == 0:
-		# if batch_idx % 500 == 0:
-		# 	with torch.no_grad():
-		# 		elogger = SegmentationLogger(self, batch[0], targets, preds, loss, acc, self.hparams.dataset_info)
-		# 		for lg in self.loggers: 
-		# 			if "wandb" in lg.__module__:
-		# 				wandb = lg
-		# 				wandb.log_image(key="train/all_wrap", images=[elogger.all_wrap()])
-		# we can return here dict with any tensors
-		# and then read it in some callback or in `training_epoch_end()` below
-		# remember to always return loss from `training_step()` or else backpropagation will fail!
+	
 		return {"loss": loss}
 
 	def training_epoch_end(self, outputs: List[Any]):
@@ -1565,32 +1654,98 @@ class DIGA(LightningModule):
 		net: torch.nn.Module,
 		dataset_info: dict = {},
 		cfg: object = None,
+		optimizer: torch.optim.Optimizer = None,
 	):
 		super().__init__()
 		self.save_hyperparameters(logger=False, ignore=["net"])
-		
 		self.net = net(
 			num_classes=self.hparams.dataset_info["num_classes"],
 			output_size=self.hparams.dataset_info["image_size"],
 		)
-
-		# loss function
-		self.criterion = torch.nn.CrossEntropyLoss()
-
+		
+		# Freeze all parameters first
+		for param in self.net.parameters():
+			param.requires_grad = False
+			
+		# Enable BN affine parameters
+		for m in self.net.modules():
+			if isinstance(m, SIFABatchNorm2d):
+				if m.affine:
+					m.weight.requires_grad = True
+					m.bias.requires_grad = True
+		
 		# use separate metric instance for train, val and test step
 		# to ensure a proper reduction over the epoch
+		self.train_acc = SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255)
 		self.test_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255).cpu() for _ in self.hparams.dataset_info["test_list"]])
-
-		# for logging best so far validation accuracy
-		self.val_acc_best = MaxMetric()
 		
 		self.test_step_global = 0
-
-		self.save_hyperparameters(logger=False, ignore=["net"])
+		
+		# Initialize confidence threshold
+		self.confident_pixels_per_image = []
+		self.total_pixels_per_image = []
+		self.image_indices = []
+		
+		# Replace BN layers and configure them
 		self._replace_bn()
 		self._configure_bn_running_stats()
+		
+		# Initialize class calculation counter
+		self.class_calculation_count = torch.zeros(self.hparams.dataset_info["num_classes"], device=self.device)
+		# Initialize thresholds array
+		self.calculation_thresholds = torch.tensor([10, 100, 1000, 2500, 10000], device=self.device)
+		
+		# Initialize prototype parameters if they exist
+		if hasattr(self, 'classifier_running_proto'):
+			self.classifier_running_proto.requires_grad = True
 
-	# lightning callback
+	def training_step(self, batch: Any, batch_idx: int):
+		x, y, shape_, name_ = batch
+	
+		target_size = (y.shape[-2], y.shape[-1])
+		
+		# compute loss between prototype and model predict as pseudo-labels
+		_, outputs, pseudo_labels, info, feature = self.step(batch)
+		
+		feature, outputs = self.net(x, feat=True)
+		
+		# Upsample to match target size (both height and width)
+		outputs = nn.Upsample(size=target_size, mode='bilinear', align_corners=True)(outputs)
+		
+		# print('y shape', y.shape)
+		# print('outputs shape', outputs.shape)
+		loss = F.cross_entropy(outputs, y, ignore_index=255)
+		acc = self.train_acc(outputs, y)
+		
+		self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+		return {"loss": loss}
+
+	def collect_params(self, model):
+		params = []
+		names = []
+		# collect only bn
+		for nm, m in model.named_modules():
+			if isinstance(m, SIFABatchNorm2d) or isinstance(m, SIFABatchNorm2dTrainable):
+				for np, p in m.named_parameters():
+					if np in ["weight", "bias", "lambda_"]:
+						params.append(p)
+						names.append(f"{nm}.{np}")
+		return params, names
+	
+	def configure_optimizers(self):
+		"""Configure optimizer with fixed learning rate."""
+		params, names = self.collect_params(self.net)
+		
+		# Create optimizer with parameters from config
+		optimizer = torch.optim.SGD(
+			params=params,
+			lr=float(self.hparams.optimizer.lr),
+			momentum=float(self.hparams.optimizer.momentum),
+			weight_decay=float(self.hparams.optimizer.weight_decay)
+		)
+		
+		return {"optimizer": optimizer}
+
 	def on_test_start(self):
 		# metric to cpu
 		for metric in self.test_acc:
@@ -1602,36 +1757,39 @@ class DIGA(LightningModule):
 			outputs = outputs[-1]
 		return outputs
 	
+
 	def step(self, batch: Any):
 		x, y, shape_, name_ = batch
 		target_size = y.shape[-2:]
-		outputs, info = self.forward_and_adapt((x,y))
+		outputs, info, feature = self.forward_and_adapt((x,y))
 		loss = torch.tensor(0.0, device=self.device)
 		outputs = nn.Upsample(size=target_size, mode='bilinear')(outputs)
-		return loss.cpu(), outputs.cpu(), y.cpu(), info
-	
+		# loss = self.dot_loss(outputs)
+		return loss.cpu(), outputs.cpu(), y.cpu(), info, feature
+
 	def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
 		x, y, shape_, name_ = batch
-		loss, preds, targets, info = self.step(batch)
+
+		loss, preds, targets, info, feature = self.step(batch)
+		
+		# Store features and labels for visualization
+		self.last_features = feature
+		self.last_labels = targets
+		
 		# log test metrics
 		acc = self.test_acc[dataloader_idx](preds, targets)
 		self.log(f"test/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
 		self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
 		self.test_step_global += 1
 		return {"loss": loss}
-	
+
 	def forward_and_adapt(self, pair):
-		"""Forward and adapt model on batch of data.
-		Measure entropy of the model prediction, take gradients, and update params.
-		Return: 
-		1. model outputs; 
-		2. the number of reliable and non-redundant samples; 
-		3. the number of reliable samples;
-		4. the moving average  probability vector over all previous samples
-		"""
+		"""Forward and adapt model on batch of data."""
 		x, y = pair
+		
 		# no_grad
 		feature, outputs = self.net(x, feat=True)
+		
 		to_logs = {}
 		outputs_proto, to_logs_ = self.multi_proto_label(
 			feature,
@@ -1642,9 +1800,13 @@ class DIGA(LightningModule):
 		)
 
 		outputs = outputs_proto * self.hparams.cfg.fusion_lambda + outputs.softmax(1) * (1 - self.hparams.cfg.fusion_lambda)
-		return outputs.cpu(), to_logs
-	
-	def test_epoch_end(self, outputs: List[Any]):
+		return outputs, to_logs, feature
+
+	def test_epoch_end(self, outputs: List[Any]): 
+		# Calculate and print statistics
+		stats = self._calculate_overall_statistics()
+		self._print_statistics(stats)
+		
 		test_accs = [test_acc.compute() for test_acc in self.test_acc]
 		acc_mean = sum(test_accs) / len(test_accs)
 		self.log("test/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True)
@@ -1658,10 +1820,49 @@ class DIGA(LightningModule):
 			self.wandb.log_table(key=f"test/class_iou/dataloaderr_idx_{str(i)}", columns=list(class_names), data=[class_iou])
 		for i, test_acc in enumerate(self.test_acc): # reset
 			test_acc.reset()
-
-	def high_confident_proto_label(self, outputs, threshold):
+		
+	def _update_statistics(self, above_threshold: int, total_pixels: int):
+		"""Update statistics for a single image.
+		
+		Args:
+			above_threshold: Number of pixels above confidence threshold
+			total_pixels: Total number of pixels in the image
+		"""
+		self.confident_pixels_per_image.append(above_threshold)
+		self.total_pixels_per_image.append(total_pixels)
+		self.image_indices.append(len(self.image_indices))
+		
+	def _calculate_overall_statistics(self) -> dict:
+		"""Calculate and return overall statistics.
+		
+		Returns:
+			Dictionary containing overall statistics
+		"""
+		total_confident = sum(self.confident_pixels_per_image)
+		total_pixels = sum(self.total_pixels_per_image)
+		avg_percentage = total_confident / total_pixels * 100
+		
+		return {
+			'total_images': len(self.image_indices),
+			'avg_confident_pixels': total_confident/len(self.image_indices),
+			'avg_percentage': avg_percentage
+		}
+		
+	def _print_statistics(self, stats: dict):
+		"""Print statistics in a formatted way.
+		
+		Args:
+			stats: Dictionary containing statistics to print
+		"""
+		print(f"\nOverall Statistics:")
+		print(f"Total number of images: {stats['total_images']}")
+		print(f"Average confident pixels per image: {stats['avg_confident_pixels']:.0f}")
+		print(f"Average percentage of confident pixels: {stats['avg_percentage']:.2f}%")
+		
+	def high_confident_proto_label(self, outputs, threshold, number_of_prototypes):
 		"""High confident pseudo label.
 		For each pixel, output the max prob class if max_prob > bar, else 255
+		
 		Args:
 			outputs: (B, C, H, W), logits
 			bar: float, threshold
@@ -1670,9 +1871,47 @@ class DIGA(LightningModule):
 		Returns:
 			pseudo_label: (B, H, W)
 		"""
+		# Convert logits to probabilities using softmax
 		outputs = outputs.softmax(dim=1)
 		pseudo_label = outputs.argmax(dim=1)
-		pseudo_label[outputs.max(dim=1)[0] < threshold] = 255
+		
+		# Calculate number of pixels above threshold for each image in the batch
+		max_probs = outputs.max(dim=1)[0]
+	
+		# Calculate number of pixels to keep per image
+		total_pixels_per_image = max_probs[0].numel()  # H * W
+		k_pixels = int(total_pixels_per_image * number_of_prototypes)  # Number of pixels to keep
+		
+		# Initialize mask for confident pixels
+		confident_mask = torch.zeros_like(max_probs, dtype=torch.bool)
+		
+		# Process each image in the batch for top-k pixels
+		for i in range(max_probs.shape[0]):
+			# Flatten probabilities for this image
+			flat_probs = max_probs[i].flatten()
+			
+			# Get indices of top k pixels
+			_, top_indices = torch.topk(flat_probs, k_pixels)
+			
+			# Create mask for this image
+			img_mask = torch.zeros_like(flat_probs, dtype=torch.bool)
+			img_mask[top_indices] = True
+			
+			# Reshape mask back to image dimensions
+			confident_mask[i] = img_mask.reshape(max_probs[i].shape)
+		
+		# Process confident pixels for smaller than threshold
+		confident_mask = confident_mask & (max_probs > threshold)
+	
+		# Update statistics
+		above_threshold = confident_mask.sum().item()
+		total_pixels = confident_mask.numel()
+		self._update_statistics(above_threshold, total_pixels)
+		
+		# Set non-confident pixels to 255
+		pseudo_label[~confident_mask] = 255
+		pseudo_unique = pseudo_label.unique()
+		# print('number of confident', len(pseudo_unique))
 		return pseudo_label
 	
 	def multi_proto_label(self, feature, outputs, y, class_names, cfg):
@@ -1696,6 +1935,7 @@ class DIGA(LightningModule):
 		proto_label = self.high_confident_proto_label(
 			outputs, 
 			threshold=cfg.confidence_threshold, 
+			number_of_prototypes=cfg.number_of_prototypes
 		)
 		proto, exists_flag = self.cal_proto(feature, proto_label)
 		# init or update mean prototypes
@@ -1709,7 +1949,7 @@ class DIGA(LightningModule):
 		multi_pred = cfg.proto_lambda * mean_pred + (1-cfg.proto_lambda) * instance_pred
 		return multi_pred, to_logs
 	
-	def cal_pred_of_proto(self, feature, proto, exists_flag, tau=1.0):
+	def cal_pred_of_proto(self, feature, proto, exists_flag, tau=2.0):
 		""" Calculate the weight for classes of each pixel.
 		For each pixel, we calculate the distance between the prototype of each class and the feature of the pixel.
 		Then, we calculate the weight of each class by softmax with temperature tau.
@@ -1726,8 +1966,12 @@ class DIGA(LightningModule):
 		# calculate distance
 		feature = feature.unsqueeze(1) # [B, 1, CH, H, W]
 		proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [1, C, CH, 1, 1]
+		# feature_norm = feature / (feature.norm(dim=2, keepdim=True) + 1e-8)
+		# proto_norm = proto / (proto.norm(dim=2, keepdim=True) + 1e-8)
+		# cos_sim = torch.sum(feature_norm * proto_norm, dim=2)
+		# dist = 1 - cos_sim
 		dist = torch.norm(proto - feature, dim=2) # [B, C, H, W]
-		# calculate weight
+		# calculate weight by softmax
 		weight = torch.exp(-dist / tau) # [B, C, H, W]
 		weight = weight * exists_flag.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [B, C, H, W]
 		weight = weight / torch.sum(weight, dim=1, keepdim=True) # [B, C, H, W]
@@ -1761,7 +2005,14 @@ class DIGA(LightningModule):
 				classifier_proto[i] = proto[i]
 				classifier_proto_exists_flag[i] = 1
 			else:
-				classifier_proto[i] = (1-rho) * classifier_proto[i] + rho * proto[i]
+				# Adjust rho based on calculation count
+				count = self.class_calculation_count[i]
+				# Find the position in thresholds array
+				pos = torch.sum(count > self.calculation_thresholds)
+				adjusted_rho = 0.5 - (pos * 0.1)  # Start from 0.5 and decrease by 0.1 for each threshold
+				adjusted_rho = max(adjusted_rho, 0.1)  # Ensure minimum rho is 0.1
+				classifier_proto[i] = (1-adjusted_rho) * classifier_proto[i] + adjusted_rho * proto[i]
+				self.class_calculation_count[i] += 1
 		return classifier_proto, classifier_proto_exists_flag 
 
 	@torch.no_grad()
@@ -1781,6 +2032,7 @@ class DIGA(LightningModule):
 		proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
 		feature = feature.unsqueeze(1)
 		dist = torch.norm(proto - feature, dim=2)
+		# dist = self.fidelity(feature, proto)
 		# calculate weight
 		weight = torch.softmax(-dist / tau, dim=1)
 		return weight
@@ -1804,13 +2056,6 @@ class DIGA(LightningModule):
 			proto[i] = feature.permute((1, 0, 2, 3)).flatten(1).permute((1,0))[masks].mean(0)
 		return proto, with_flag
 	
-	# utils operation
-	def _configure_bn_running_stats(self):
-		"""Configure model for use with eata."""
-		for m in self.net.modules():
-			if isinstance(m, nn.BatchNorm2d):
-				m.lambda_.data = torch.tensor(self.hparams.cfg.bn_lambda)
-	
 	def _replace_bn(self):
 		"""
 		Replace all BN layers with new class for DIGA
@@ -1831,6 +2076,13 @@ class DIGA(LightningModule):
 		for n, module in self.net.named_modules():
 			if isinstance(module, nn.BatchNorm2d):
 				set_layer(self.net, n, SIFABatchNorm2dTrainable().from_bn(module).to(self.device))
+   
+	def _configure_bn_running_stats(self):
+		for m in self.net.modules():
+			# if isinstance(m, nn.BatchNorm2d):
+			if isinstance(m, SIFABatchNorm2d):
+				m.lambda_.data = torch.tensor(self.hparams.cfg.bn_lambda)
+				m.memory_bank_size = self.hparams.cfg.memory_bank_size
 	
 	# others
 	@property
@@ -1839,7 +2091,6 @@ class DIGA(LightningModule):
 			if "wandb" in lg.__module__:
 				return lg
 		raise ValueError("No wandb logger found")
-
 
 if __name__ == "__main__":
 	import hydra
