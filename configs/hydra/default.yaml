@@ -5,11 +5,11 @@ defaults:
   - override hydra_logging: colorlog
   - override job_logging: colorlog
   # - override launcher: submitit_slurm
-  # - override launcher: ${paths.log_dir}
+  # - override launcher: /kaggle/working/DIGA/output
 
 # output directory, generated dynamically on each run
 run:
-  dir: ${paths.log_dir}/${task_name}/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dir: /kaggle/working/DIGA/output/${task_name}/runs/${now:%Y-%m-%d}_${now:%H-%M-%S}
 sweep:
-  dir: ${paths.log_dir}/${task_name}/multiruns/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  dir: /kaggle/working/DIGA/output/${task_name}/multiruns/${now:%Y-%m-%d}_${now:%H-%M-%S}
   subdir: ${hydra.job.num}
