@@ -1,35 +1,35 @@
 task_name: test-time-DA
 tags:
-  - ttda
-  - coding
+- ttda
+- coding
 train: true
 test: false
 ckpt_path: null
 seed: 55555
 datamodule:
   test_list:
-    - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
-      _partial_: true
-      set: val
+  - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
+    _partial_: true
+    set: val
   _target_: src.datamodules.ttda_datamodule.Sim2RealSegmentationDataModule
   data_dir: ${paths.data_dir}
   batch_size: 1
-  num_workers: 1
+  num_workers: ${oc.decode:${oc.env:NUM_WORKERS}}
   pin_memory: false
   train_list:
-    - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
-      _partial_: true
-      set: val
+  - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
+    _partial_: true
+    set: val
   val_list:
-    - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
-      _partial_: true
-      set: val
+  - _target_: src.datamodules.ttda_datamodule.CityscapesDataSet
+    _partial_: true
+    set: val
 model:
   net:
     _target_: src.models.ttda_module.DeepLabv2AdaptSeg
     _partial_: true
     multi_level: true
-    restore_from: /kaggle/input/gta5_baseline/pytorch/default/1/GTA5_baseline.pth
+    restore_from: ${paths.data_dir}/models/DA_Seg_models/GTA5/GTA5_baseline.pth
   _target_: src.models.ttda_module.DIGA
   cfg:
     bn_lambda: 0.8
@@ -48,7 +48,7 @@ model:
 callbacks:
   model_checkpoint:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
-    dirpath: /kaggle/working/DIGA/output/checkpoints
+    dirpath: ${paths.output_dir}/checkpoints
     filename: epoch_{epoch:03d}
     monitor: val/acc
     verbose: false
@@ -70,18 +70,18 @@ callbacks:
 logger:
   wandb:
     _target_: pytorch_lightning.loggers.wandb.WandbLogger
-    save_dir: /kaggle/working/DIGA/output/wandb/${task_name}
+    save_dir: ${paths.log_dir}/wandb/${task_name}
     id: null
     anonymous: null
     project: ${task_name}
     log_model: false
-    prefix: ""
+    prefix: ''
     group: debug
     tags: ${tags}
-    job_type: ""
+    job_type: ''
 trainer:
   _target_: pytorch_lightning.Trainer
-  default_root_dir: /kaggle/working/DIGA/output
+  default_root_dir: ${paths.output_dir}
   min_epochs: 1
   max_epochs: 1
   accelerator: gpu
@@ -92,7 +92,7 @@ trainer:
   strategy: ddp
   num_nodes: 1
   sync_batchnorm: true
-  log_every_n_steps: 5
+  log_every_n_steps: 1
   num_sanity_val_steps: 0
 paths:
   root_dir: ${oc.env:PROJECT_ROOT}

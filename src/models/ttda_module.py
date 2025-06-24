@@ -28,6 +28,8 @@ import matplotlib.pyplot as plt
 import os 
 import json
 import cv2
+from PIL import Image
+from .aug import AugCO
 
 logger = logging.getLogger('lightning')
 logging.getLogger('PIL').setLevel(logging.INFO)
@@ -35,2246 +37,2217 @@ logging.getLogger('PIL').setLevel(logging.INFO)
 """utils"""
 
 class SegmentationUpsample:
-	"""upsample depends on input"""
-	def __init__(self, size) -> None:
-		self.size = size
-	
-	def __call__(self, x):
-		"""
-		For x type:
-			if input with float tensor, use bilinear interpolation
-			if input with long or bool tensor, transform to float tensor and use bilinear interpolation, then transform back to long or bool tensor
-		For x dim:
-			if input with 4 dim, do nothing
-			if input with 3 or 2 dim, unsqueeze to 4 dim then squeeze to original dim
-		"""
-		origin_dtype = x.dtype
-		# interpolation type
-		if origin_dtype == torch.float: interpolation = 'nearest' # 'bilinear'
-		elif origin_dtype == torch.long or origin_dtype == torch.bool: interpolation = 'nearest'
-		else: raise ValueError('input dtype must be float, long or bool')
-		# to float tensor
-		if origin_dtype == torch.long or origin_dtype == torch.bool: x = x.float()
-		# start interpolation
-		if x.dim() == 4:
-			x = F.interpolate(x, size=self.size, mode=interpolation)
-		elif x.dim() == 3:
-			x = F.interpolate(x.unsqueeze(0), size=self.size, mode=interpolation).squeeze(0)
-		elif x.dim() == 2:
-			x = F.interpolate(x.unsqueeze(0).unsqueeze(0), size=self.size, mode=interpolation).squeeze(0).squeeze(0)
-		else:
-			raise ValueError(f'Input tensor dimension {x.dim()} is not supported')
-		# to origin dtype
-		x = x.type(origin_dtype)
-		return x
+    """upsample depends on input"""
+    def __init__(self, size) -> None:
+        self.size = size
+    
+    def __call__(self, x):
+        """
+        For x type:
+            if input with float tensor, use bilinear interpolation
+            if input with long or bool tensor, transform to float tensor and use bilinear interpolation, then transform back to long or bool tensor
+        For x dim:
+            if input with 4 dim, do nothing
+            if input with 3 or 2 dim, unsqueeze to 4 dim then squeeze to original dim
+        """
+        origin_dtype = x.dtype
+        # interpolation type
+        if origin_dtype == torch.float: interpolation = 'nearest' # 'bilinear'
+        elif origin_dtype == torch.long or origin_dtype == torch.bool: interpolation = 'nearest'
+        else: raise ValueError('input dtype must be float, long or bool')
+        # to float tensor
+        if origin_dtype == torch.long or origin_dtype == torch.bool: x = x.float()
+        # start interpolation
+        if x.dim() == 4:
+            x = F.interpolate(x, size=self.size, mode=interpolation)
+        elif x.dim() == 3:
+            x = F.interpolate(x.unsqueeze(0), size=self.size, mode=interpolation).squeeze(0)
+        elif x.dim() == 2:
+            x = F.interpolate(x.unsqueeze(0).unsqueeze(0), size=self.size, mode=interpolation).squeeze(0).squeeze(0)
+        else:
+            raise ValueError(f'Input tensor dimension {x.dim()} is not supported')
+        # to origin dtype
+        x = x.type(origin_dtype)
+        return x
 """pytorch model"""
 class SegmentationLogger:
-	"""TODO check no grad"""
-	IMAGE_SIZE = (100, 100)
+    """TODO check no grad"""
+    IMAGE_SIZE = (100, 100)
 
-	# @torch.no_grad()
-	def __init__(self, model, data, targets, preds, loss, acc, dataset_info={}, plot_limit=5):
-		batch_size = targets.shape[0]
-		self.model = model
-		self.data = data[:plot_limit].cpu()
-		self.targets = targets[:plot_limit].cpu()
-		self.preds = preds[:plot_limit].cpu()
-		self.loss = loss
-		self.acc = acc
-		self.dataset_info = dataset_info
-		self.plot_limit = min(plot_limit, batch_size)
-	
-	def origin_img(self):
-		imgs = [self.data[i] for i in range(self.data.shape[0])]
-		return make_grid(imgs, nrow=self.plot_limit, normalize=True)
-	
-	def img_with_target_seg(self):
-		return self._img_with_seg(self.targets)
+    # @torch.no_grad()
+    def __init__(self, model, data, targets, preds, loss, acc, dataset_info={}, plot_limit=5):
+        batch_size = targets.shape[0]
+        self.model = model
+        self.data = data[:plot_limit].cpu()
+        self.targets = targets[:plot_limit].cpu()
+        self.preds = preds[:plot_limit].cpu()
+        self.loss = loss
+        self.acc = acc
+        self.dataset_info = dataset_info
+        self.plot_limit = min(plot_limit, batch_size)
+    
+    def origin_img(self):
+        imgs = [self.data[i] for i in range(self.data.shape[0])]
+        return make_grid(imgs, nrow=self.plot_limit, normalize=True)
+    
+    def img_with_target_seg(self):
+        return self._img_with_seg(self.targets)
 
-	def img_with_pred_seg(self):
-		return self._img_with_seg(self.preds)
+    def img_with_pred_seg(self):
+        return self._img_with_seg(self.preds)
 
-	def img_with_correct_mask(self):
-		"""
-		mark the correct prediction with green, wrong with red
-		"""
-		imgs = self.data 
-		imgs = (imgs * 255).type(torch.uint8)
-		preds = self.preds.argmax(dim=1)
-		correct_mask = (self.targets == preds)
-		res = [(draw_segmentation_masks(imgs[i], correct_mask[i], alpha=0.5).type(torch.float32) / 255) for i in range(self.plot_limit)]
-		res = make_grid(res, nrow=self.plot_limit, normalize=True)
-		return res
+    def img_with_correct_mask(self):
+        """
+        mark the correct prediction with green, wrong with red
+        """
+        imgs = self.data 
+        imgs = (imgs * 255).type(torch.uint8)
+        preds = self.preds.argmax(dim=1)
+        correct_mask = (self.targets == preds)
+        res = [(draw_segmentation_masks(imgs[i], correct_mask[i], alpha=0.5).type(torch.float32) / 255) for i in range(self.plot_limit)]
+        res = make_grid(res, nrow=self.plot_limit, normalize=True)
+        return res
 
-	def _img_with_seg(self, seg):
-		"""
-		seg: [batch, 1, H, W] or [batch, H, W]
-		"""
-		imgs = [self.data[i] for i in range(self.data.shape[0])]
-		segs = [seg[i] for i in range(seg.shape[0])]
-		return make_grid([self._add_seg(imgs[i], segs[i]) for i in range(self.plot_limit)], nrow=self.plot_limit, normalize=True)
+    def _img_with_seg(self, seg):
+        """
+        seg: [batch, 1, H, W] or [batch, H, W]
+        """
+        imgs = [self.data[i] for i in range(self.data.shape[0])]
+        segs = [seg[i] for i in range(seg.shape[0])]
+        return make_grid([self._add_seg(imgs[i], segs[i]) for i in range(self.plot_limit)], nrow=self.plot_limit, normalize=True)
 
-	# @torch.no_grad()
-	def _add_seg(self, img, seg):
-		"""visulize image with segmentation mask with draw_segmentation_masks
-		img: [3, H, W]
-		seg: [num_classes, H, W] or [H, W]
-		"""
-		# normalize image to [0, 1] then convert to int8 tensor
-		num_classes = self.dataset_info['num_classes']
-		img = (img - img.min()) / (img.max() - img.min())
-		img = (img * 255).type(torch.uint8)
-		if seg.dim() == 3:
-			seg = seg.argmax(dim=0)
-		# if seg is [H, W], turn to one_hot
-		if len(seg.shape) == 2:
-			seg[seg == 255] = num_classes
-			seg = F.one_hot(seg, num_classes+1)
-			seg = seg.permute(2, 0, 1)
-		# convert to bool mask tensor
-		seg = seg.type(torch.bool)
-		res = draw_segmentation_masks(img, seg, alpha=0.5)
-		# turn int to float
-		res = res.type(torch.float32) / 255
-		return res
+    # @torch.no_grad()
+    def _add_seg(self, img, seg):
+        """visulize image with segmentation mask with draw_segmentation_masks
+        img: [3, H, W]
+        seg: [num_classes, H, W] or [H, W]
+        """
+        # normalize image to [0, 1] then convert to int8 tensor
+        num_classes = self.dataset_info['num_classes']
+        img = (img - img.min()) / (img.max() - img.min())
+        img = (img * 255).type(torch.uint8)
+        if seg.dim() == 3:
+            seg = seg.argmax(dim=0)
+        # if seg is [H, W], turn to one_hot
+        if len(seg.shape) == 2:
+            seg[seg == 255] = num_classes
+            seg = F.one_hot(seg, num_classes+1)
+            seg = seg.permute(2, 0, 1)
+        # convert to bool mask tensor
+        seg = seg.type(torch.bool)
+        res = draw_segmentation_masks(img, seg, alpha=0.5)
+        # turn int to float
+        res = res.type(torch.float32) / 255
+        return res
 
-	def all_wrap(self):
-		res = [
-			self.origin_img(),
-			self.img_with_target_seg(),
-			self.img_with_pred_seg(),
-			self.img_with_correct_mask()
-		]
-		# TODO split wrapper from each funciton, the original output is a list of tensor, but the wrapper output is a tensor
-		return make_grid(res, nrow=1, normalize=True)
+    def all_wrap(self):
+        res = [
+            self.origin_img(),
+            self.img_with_target_seg(),
+            self.img_with_pred_seg(),
+            self.img_with_correct_mask()
+        ]
+        # TODO split wrapper from each funciton, the original output is a list of tensor, but the wrapper output is a tensor
+        return make_grid(res, nrow=1, normalize=True)
  
 class SegmentationMetric(Metric):
-	""" Metric for segmentation.
-	"""
-	def __init__(self, num_classes: int, ignore_index: int = 255):
-		super().__init__()
-		self.num_classes = num_classes
-		self.ignore_index = ignore_index
-		self.add_state("hist", default=torch.zeros((self.num_classes, self.num_classes)), dist_reduce_fx="sum")
-		# store last batch hist
-		self.add_state("last_hist", default=torch.zeros((self.num_classes, self.num_classes)), dist_reduce_fx="sum")
-		
-	def update(self, preds: torch.Tensor, target: torch.Tensor):
-		""" Receives the output of the model and the target.
-		"""
-		with torch.no_grad():
-			batch_size = target.shape[0]
-			preds, target = self._input_format(preds, target)
-			assert preds.shape == target.shape
-			self.last_hist = self._fast_hist(preds.flatten(), target.flatten()) * batch_size
-			self.hist += self.last_hist
+    """ Metric for segmentation.
+    """
+    def __init__(self, num_classes: int, ignore_index: int = 255):
+        super().__init__()
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.add_state("hist", default=torch.zeros((self.num_classes, self.num_classes)), dist_reduce_fx="sum")
+        # store last batch hist
+        self.add_state("last_hist", default=torch.zeros((self.num_classes, self.num_classes)), dist_reduce_fx="sum")
+    
+    def to(self, device):
+        super().to(device)
+        self.hist = self.hist.to(device)
+        self.last_hist = self.last_hist.to(device)
+        return self 
+    
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """ Receives the output of the model and the target.
+        """
+        with torch.no_grad():
+            batch_size = target.shape[0]
+            preds, target = self._input_format(preds, target)
+            assert preds.shape == target.shape
+            self.last_hist = self._fast_hist(preds.flatten(), target.flatten()) * batch_size
+            self.hist += self.last_hist
 
-	def _fast_hist(self, preds: torch.Tensor, target: torch.Tensor):
-		"""Compute the histogram.
-		"""
-		k = (target >= 0) & (target < self.num_classes)
-		hist = torch.bincount(self.num_classes * target[k].int() + preds[k], minlength=self.num_classes ** 2).reshape(self.num_classes, self.num_classes)
-		return hist
-	
-	def _input_format(self, preds: torch.Tensor, target: torch.Tensor):
-		"""Convert the input to the correct format.
-		"""
-		if preds.dim() == 4:
-			preds = preds.argmax(dim=1)
-		assert preds.dim() == 3
-		assert preds.shape == target.shape
-		return preds, target
+    def _fast_hist(self, preds: torch.Tensor, target: torch.Tensor):
+        """Compute the histogram.
+        """
+        k = (target >= 0) & (target < self.num_classes)
+        hist = torch.bincount(self.num_classes * target[k].int() + preds[k], minlength=self.num_classes ** 2).reshape(self.num_classes, self.num_classes)
+        return hist
+    
+    def _input_format(self, preds: torch.Tensor, target: torch.Tensor):
+        """Convert the input to the correct format.
+        """
+        if preds.dim() == 4:
+            preds = preds.argmax(dim=1)
+        assert preds.dim() == 3
+        assert preds.shape == target.shape
+        return preds, target
 
-	def _per_class_iou(self, hist: torch.Tensor):
-		""" Compute the per class IoU.
-		"""
-		ious = torch.diag(hist) / (hist.sum(dim=1) + hist.sum(dim=0) - torch.diag(hist))
-		return ious
+    def _per_class_iou(self, hist: torch.Tensor):
+        """ Compute the per class IoU.
+        """
+        ious = torch.diag(hist) / (hist.sum(dim=1) + hist.sum(dim=0) - torch.diag(hist))
+        return ious
 
-	def compute(self):
-		""" Compute the metric."""
-		ious = self._per_class_iou(self.hist)
-		mean_iou = torch.nanmean(ious) * 100.0
-		return mean_iou # TODO add other metrics
-	
-	def compute_iou(self, type="default"):
-		""" Compute the metric."""
-		ious = self._per_class_iou(self.hist)
-		if type == "default":
-			mean_iou = torch.nanmean(ious) * 100.0
-		elif type == "16":
-			# ignore class 9, 14, 16
-			ious = ious[[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]]
-			mean_iou = torch.nanmean(ious) * 100.0
-		elif type == "13":
-			# ignore class 3, 4, 5, 9, 14, 16
-			ious = ious[[0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]]
-			mean_iou = torch.nanmean(ious) * 100.0
-		else: 
-			raise NotImplementedError
-		return mean_iou # TODO add other metrics
+    def compute(self):
+        """ Compute the metric."""
+        ious = self._per_class_iou(self.hist)
+        mean_iou = torch.nanmean(ious) * 100.0
+        return mean_iou # TODO add other metrics
+    
+    def compute_iou(self, type="default"):
+        """ Compute the metric."""
+        ious = self._per_class_iou(self.hist)
+        if type == "default":
+            mean_iou = torch.nanmean(ious) * 100.0
+        elif type == "16":
+            # ignore class 9, 14, 16
+            ious = ious[[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]]
+            mean_iou = torch.nanmean(ious) * 100.0
+        elif type == "13":
+            # ignore class 3, 4, 5, 9, 14, 16
+            ious = ious[[0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]]
+            mean_iou = torch.nanmean(ious) * 100.0
+        else: 
+            raise NotImplementedError
+        return mean_iou # TODO add other metrics
 
-	def compute_class_iou(self):
-		""" Compute the per class IoU."""
-		ious = self._per_class_iou(self.hist) * 100.0
-		return ious
-	
-	def compute_confusion_matrix(self):
-		""" Compute the confusion matrix."""
-		return self.hist
+    def compute_class_iou(self):
+        """ Compute the per class IoU."""
+        ious = self._per_class_iou(self.hist) * 100.0
+        return ious
+    
+    def compute_confusion_matrix(self):
+        """ Compute the confusion matrix."""
+        return self.hist
 
 affine_par = True
 
 def trans_e_margin(e_margin, class_num):
-	# check e margin in 0,1
-	if not 0.0 <= e_margin <= 1.0: raise ValueError("e_margin should be 0.-1.")
-	# cal min entropy for class_num
-	e_max = - class_num * np.log(1/class_num) * (1/class_num)
-	e_min = - np.log(1)
-	return e_min + (e_max - e_min) * e_margin
+    # check e margin in 0,1
+    if not 0.0 <= e_margin <= 1.0: raise ValueError("e_margin should be 0.-1.")
+    # cal min entropy for class_num
+    e_max = - class_num * np.log(1/class_num) * (1/class_num)
+    e_min = - np.log(1)
+    return e_min + (e_max - e_min) * e_margin
 
 def entropy_norm_mul(pred_1, pred_2):
-	""" merge two prediction by entropy norm multiply.
-	Normlize the entropy of two prediction, then multiply them.
+    """ merge two prediction by entropy norm multiply.
+    Normlize the entropy of two prediction, then multiply them.
 
-	Args:
-		pred_1: [B, C, H, W]
-		pred_2: [B, C, H, W]
-	Returns:
-		merged_pred: [B, C, H, W]
-	"""
-	pass
+    Args:
+        pred_1: [B, C, H, W]
+        pred_2: [B, C, H, W]
+    Returns:
+        merged_pred: [B, C, H, W]
+    """
+    pass
 
 class CustomBatchNorm2d(nn.BatchNorm2d):
-	def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
-				 affine=True, track_running_stats=True):
-		super().__init__(
-			num_features, eps, momentum, affine, track_running_stats)
+    def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
+                 affine=True, track_running_stats=True):
+        super().__init__(
+            num_features, eps, momentum, affine, track_running_stats)
 
-	def forward(self, input):
-		self._check_input_dim(input)
+    def forward(self, input):
+        self._check_input_dim(input)
 
-		exponential_average_factor = 0.0
+        exponential_average_factor = 0.0
 
-		if self.training and self.track_running_stats:
-			if self.num_batches_tracked is not None:
-				self.num_batches_tracked += 1
-				if self.momentum is None:  # use cumulative moving average
-					exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-				else:  # use exponential moving average
-					exponential_average_factor = self.momentum
+        if self.training and self.track_running_stats:
+            if self.num_batches_tracked is not None:
+                self.num_batches_tracked += 1
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
 
-		# calculate running estimates
-		if self.training:
-			mean = input.mean([0, 2, 3])
-			# use biased var in train
-			var = input.var([0, 2, 3], unbiased=False)
-			n = input.numel() / input.size(1)
-			# with torch.no_grad():
-			self.running_mean = exponential_average_factor * mean\
-				+ (1 - exponential_average_factor) * self.running_mean
-			# update running_var with unbiased var
-			self.running_var = exponential_average_factor * var * n / (n - 1)\
-				+ (1 - exponential_average_factor) * self.running_var
-		else:
-			mean = self.running_mean
-			var = self.running_var
+        # calculate running estimates
+        if self.training:
+            mean = input.mean([0, 2, 3])
+            # use biased var in train
+            var = input.var([0, 2, 3], unbiased=False)
+            n = input.numel() / input.size(1)
+            # with torch.no_grad():
+            self.running_mean = exponential_average_factor * mean\
+                + (1 - exponential_average_factor) * self.running_mean
+            # update running_var with unbiased var
+            self.running_var = exponential_average_factor * var * n / (n - 1)\
+                + (1 - exponential_average_factor) * self.running_var
+        else:
+            mean = self.running_mean
+            var = self.running_var
 
-		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
-		if self.affine:
-			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
-		return input
-		model.train()
-		forward()
-		model.eval()
-		forward()
+        return input
+        model.train()
+        forward()
+        model.eval()
+        forward()
 
-	def from_bn(self, bn):
-		self.__init__(
-			bn.num_features, bn.eps, bn.momentum,
-			bn.affine, bn.track_running_stats
-		)
-		# copy all self.xxx
-		self.load_state_dict(bn.state_dict())
-		return self
+    def from_bn(self, bn):
+        self.__init__(
+            bn.num_features, bn.eps, bn.momentum,
+            bn.affine, bn.track_running_stats
+        )
+        # copy all self.xxx
+        self.load_state_dict(bn.state_dict())
+        return self
 
+from collections import deque
 class FeatureMemory(nn.Module):
-	"""A class to manage feature memory bank with proper tensor handling."""
-	def __init__(self, max_size: int):
-		super().__init__()
-		self.max_size = max_size
-		self.register_buffer('memory', torch.zeros(0))
-		
-	def add(self, tensor: torch.Tensor):
-		"""Add a tensor to memory with proper cloning and device handling."""
-		# Clone and detach the tensor
-		tensor = tensor.detach().clone()
-		
-		# Add to memory
-		if self.memory.numel() == 0:
-			# Initialize memory with the first tensor
-			self.memory = tensor.unsqueeze(0)
-		else:
-			# Ensure both tensors have the same number of dimensions
-			if self.memory.dim() == 1:
-				self.memory = self.memory.unsqueeze(0)
-			if tensor.dim() == 1:
-				tensor = tensor.unsqueeze(0)
-			self.memory = torch.cat([self.memory, tensor], dim=0)
-			
-	def remove(self, number: int, status: int = 0):
-		"""Remove specified number of entries from memory bank.
-		
-		Args:
-			number: Number of entries to remove
-			status: Removal strategy (0: random, 1: oldest entries)
-		"""
-		if self.memory.numel() == 0:
-			return
-			
-		if status == 0:  # Random removal
-			# Generate random indices
-			indices = torch.randperm(len(self))[:number].tolist()
-			# Sort indices in descending order to avoid index shifting
-			for idx in sorted(indices, reverse=True):
-				self.memory = torch.cat([self.memory[:idx], self.memory[idx+1:]])
-		else:  # status == 1, Remove oldest entries
-			# Remove oldest entries
-			self.memory = self.memory[number:]
-			
-	def get_stats(self) -> torch.Tensor:
-		"""Get statistics (mean) from memory bank."""
-		if self.memory.numel() == 0:
-			return None
-			
-		return self.memory.mean(dim=0)
-		
-	def clear(self):
-		"""Clear the memory bank."""
-		self.memory = torch.zeros(0, device=self.memory.device)
-		torch.cuda.empty_cache()
-		
-	def __len__(self):
-		return self.memory.size(0) if self.memory.numel() > 0 else 0
+    def __init__(self, max_size: int):
+        super().__init__()
+        self.max_size = max_size
+        self.memory = deque()
+    
+    def add(self, tensor: torch.Tensor):
+        tensor = tensor.detach().clone().cpu()  # chuyển sang CPU để tiết kiệm GPU
+        if len(self.memory) >= self.max_size:
+            self.memory.popleft()
+        self.memory.append(tensor)
+    
+    def get_stats(self):
+        if len(self.memory) == 0:
+            return None
+        mem_tensor = torch.stack(list(self.memory)).to('cuda')  # chỉ đưa lên GPU khi cần
+        return mem_tensor.mean(dim=0)
+    
+    def clear(self):
+        self.memory.clear()
+        torch.cuda.empty_cache()
+
+    def __len__(self):
+        return len(self.memory)
 
 class SIFABatchNorm2d(CustomBatchNorm2d):
-	def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
-				 affine=True, track_running_stats=True):
-		super().__init__(num_features, eps, momentum, affine, track_running_stats)
+    def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
+                 affine=True, track_running_stats=True):
+        super().__init__(num_features, eps, momentum, affine, track_running_stats)
 
-	def update_memory_bank(self, input):
-		"""Update memory banks with new batch statistics.
-		
-		Args:
-			input: [B, C, H, W]
-		"""
-		batch_size = input.size(0)
-		# Remove if needed
-		if (len(self.mean_memory) + batch_size > self.memory_bank_size):
-			need_remove = len(self.mean_memory) + batch_size - self.memory_bank_size
-			self.mean_memory.remove(need_remove, status=0)
-			self.var_memory.remove(need_remove, status=0)
-		
-		# Calculate mean and var for each image in the batch
-		for i in range(batch_size):
-			# Calculate mean and var for this image
-			img_mean = input[i].mean([1, 2])  # [C]
-			img_var = input[i].var([1, 2], unbiased=False)  # [C]
-			# Add to memory banks
-			self.mean_memory.add(img_mean)
-			self.var_memory.add(img_var)
+    def update_memory_bank(self, input):
+        """Update memory banks with new batch statistics.
+        
+        Args:
+            input: [B, C, H, W]
+        """
+        batch_size = input.size(0)
+        # # Remove if needed
+        # if (len(self.mean_memory) + batch_size > self.memory_bank_size):
+        #     need_remove = len(self.mean_memory) + batch_size - self.memory_bank_size
+        #     self.mean_memory.remove(need_remove, status=0)
+        #     self.var_memory.remove(need_remove, status=0)
+        
+        # Calculate mean and var for each image in the batch
+        for i in range(batch_size):
+            # Calculate mean and var for this image
+            img_mean = input[i].mean([1, 2])  # [C]
+            img_var = input[i].var([1, 2], unbiased=False)  # [C]
+            # Add to memory banks
+            self.mean_memory.add(img_mean)
+            self.var_memory.add(img_var)
 
-	def get_memory_bank_stats(self):
-		"""Calculate mean and variance from memory bank."""
-		mean_cur = self.mean_memory.get_stats()
-		var_cur = self.var_memory.get_stats()
-			
-		return mean_cur, var_cur
+    def get_memory_bank_stats(self):
+        """Calculate mean and variance from memory bank."""
+        mean_cur = self.mean_memory.get_stats()
+        var_cur = self.var_memory.get_stats()
 
-	def forward(self, input):
-		self._check_input_dim(input)
+        if mean_cur is None or var_cur is None:
+            mean_cur = input.mean([0, 2, 3])
+            var_cur = input.var([0, 2, 3], unbiased=False)
+            
+        return mean_cur, var_cur
 
-		exponential_average_factor = 0.0
+    def forward(self, input):
+        self._check_input_dim(input)
 
-		# if self.training and self.track_running_stats:
-		#     if self.num_batches_tracked is not None:
-		#         # self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
-		#         if self.momentum is None:  # use cumulative moving average
-		#             exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-		#         else:  # use exponential moving average
-		#             exponential_average_factor = self.momentum
+        exponential_average_factor = 0.0
 
-		# if batch_size > 1
-		# half_first = True
-		# if half_first == True:
-		#     if input.size(0) > 1:
-		#         mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
-		#         var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
-		#     else:
-		#         mean_cur = input.mean([0, 2, 3])
-		#         var_cur = input.var([0, 2, 3], unbiased=False)
-		# else:
-		mean_cur = input.mean([0, 2, 3])
-		var_cur = input.var([0, 2, 3], unbiased=False)
-		
-		if not hasattr(self, 'mean_memory'):
-			self.mean_memory = FeatureMemory(self.memory_bank_size) 
-			self.var_memory = FeatureMemory(self.memory_bank_size) 
-		
-		# Update memory banks
-		self.update_memory_bank(input)
-		mean_cur, var_cur = self.get_memory_bank_stats()
-		
-		# calculate running estimates
-		n = input.numel() / input.size(1)
-		# if self.training:
-		#     mean, var = mean_cur, var_cur
-		#     with torch.no_grad():
-		#         self.running_mean = exponential_average_factor * mean\
-		#             + (1 - exponential_average_factor) * self.running_mean
-		#         self.running_var = exponential_average_factor * var * n / (n - 1)\
-		#             + (1 - exponential_average_factor) * self.running_var
-		mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-		var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
-		# normal train -> update running mean, var. use current mean, var
-		# target 
-		# eval -> use self.running_mean, self.running_var
-		# source + current 
-		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
-		if self.affine:
-			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
-		return input
-	
-	def from_bn(self, bn):
-		self.__init__(
-			bn.num_features, bn.eps, bn.momentum,
-			bn.affine, bn.track_running_stats
-		)
-		# copy all self.xxx
-		self.load_state_dict(bn.state_dict())
-		self.lambda_ = torch.tensor(0.)
-		return self
+        if self.training and self.track_running_stats:
+            torch.cuda.empty_cache()
+            if self.num_batches_tracked is not None:
+                # self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
+
+        # if batch_size > 1:
+        #     half_first = True
+        #     if half_first == True:
+        #         if input.size(0) > 1:
+        #             mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
+        #             var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
+        #         else:
+        #             mean_cur = input.mean([0, 2, 3])
+        #             var_cur = input.var([0, 2, 3], unbiased=False)
+        # else:
+        mean_cur = input.mean([0, 2, 3])
+        var_cur = input.var([0, 2, 3], unbiased=False)
+        
+        if not hasattr(self, 'mean_memory'):
+            self.mean_memory = FeatureMemory(self.memory_bank_size) 
+            self.var_memory = FeatureMemory(self.memory_bank_size) 
+        
+        # Update memory banks
+        self.update_memory_bank(input)
+        mean_cur, var_cur = self.get_memory_bank_stats()
+        
+        # calculate running estimates
+        n = input.numel() / input.size(1)
+        if self.training:
+            torch.cuda.empty_cache()
+            mean, var = mean_cur, var_cur
+            with torch.no_grad():
+                self.running_mean = exponential_average_factor * mean\
+                    + (1 - exponential_average_factor) * self.running_mean
+                self.running_var = exponential_average_factor * var * n / (n - 1)\
+                    + (1 - exponential_average_factor) * self.running_var
+        mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
+        var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+        # normal train -> update running mean, var. use current mean, var
+        # target 
+        # eval -> use self.running_mean, self.running_var
+        # source + current 
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+        return input
+    
+    def from_bn(self, bn):
+        self.__init__(
+            bn.num_features, bn.eps, bn.momentum,
+            bn.affine, bn.track_running_stats
+        )
+        # copy all self.xxx
+        self.load_state_dict(bn.state_dict())
+        self.lambda_ = torch.tensor(0.)
+        return self
 
 class SIFABatchNorm2dTrainable(SIFABatchNorm2d):
-	def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
-				 affine=True, track_running_stats=True):
-		super().__init__(num_features, eps, momentum, affine, track_running_stats)
+    def __init__(self, num_features=0, eps=1e-5, momentum=0.1,
+                 affine=True, track_running_stats=True):
+        super().__init__(num_features, eps, momentum, affine, track_running_stats)
 
-	def from_bn(self, bn):
-		self.__init__(
-			bn.num_features, bn.eps, bn.momentum,
-			bn.affine, bn.track_running_stats
-		)
-		# copy all self.xxx
-		self.load_state_dict(bn.state_dict())
-		self.lambda_ = nn.Parameter(torch.tensor(0.5), requires_grad=True)
-		return self
+    def from_bn(self, bn):
+        self.__init__(
+            bn.num_features, bn.eps, bn.momentum,
+            bn.affine, bn.track_running_stats
+        )
+        # copy all self.xxx
+        self.load_state_dict(bn.state_dict())
+        self.lambda_ = nn.Parameter(torch.tensor(0.5), requires_grad=True)
+        return self
 
 class SourceTargetMeanBatchNorm2d(CustomBatchNorm2d):
-	"""Combining source and target mean, var for batch normalization
+    """Combining source and target mean, var for batch normalization
 
-	The source and target mean, var are combined by a linear combination
-	source_mean, source_var is tracked as self.source_mean, self.source_var
-	target_mean, target_var is tracked as self.running_mean, self.running_var
-	so the updating of self.running_mean, self.running_var is the same
-	only combination is different
-	"""
-	def forward(self, input):
-		self._check_input_dim(input)
+    The source and target mean, var are combined by a linear combination
+    source_mean, source_var is tracked as self.source_mean, self.source_var
+    target_mean, target_var is tracked as self.running_mean, self.running_var
+    so the updating of self.running_mean, self.running_var is the same
+    only combination is different
+    """
+    def forward(self, input):
+        self._check_input_dim(input)
 
-		exponential_average_factor = 0.0
+        exponential_average_factor = 0.0
 
-		if self.training and self.track_running_stats:
-			if self.num_batches_tracked is not None:
-				# self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
-				if self.momentum is None:  # use cumulative moving average
-					exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-				else:  # use exponential moving average
-					exponential_average_factor = self.momentum
+        if self.training and self.track_running_stats:
+            if self.num_batches_tracked is not None:
+                # self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
 
-		# if batch_size > 1
-		half_first = True
-		if half_first == True:
-			if input.size(0) > 1:
-				mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
-				var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
-			else:
-				mean_cur = input.mean([0, 2, 3])
-				var_cur = input.var([0, 2, 3], unbiased=False)
-		else:
-			mean_cur = input.mean([0, 2, 3])
-			var_cur = input.var([0, 2, 3], unbiased=False)
-		# calculate running estimates
-		n = input.numel() / input.size(1)
-		if self.training:
-			mean, var = mean_cur, var_cur
-			# with torch.no_grad():
-			# 	# if this is the first batch of the target domain, copy it as running mean, var
-			# 	# else use running average calculation TODO try track number calculation
-			# 	if self.adapt_start == False:
-			# 		self.running_mean = mean
-			# 		self.running_var = var
-			# 		self.adapt_start = torch.tensor(True)
-			# 	else:
-			# 		self.running_mean = exponential_average_factor * mean\
-			# 			+ (1 - exponential_average_factor) * self.running_mean
-			# 		self.running_var = exponential_average_factor * var * n / (n - 1)\
-			# 			+ (1 - exponential_average_factor) * self.running_var
-		else:
-			# check adapt start
-			# assert self.adapt_start == True, "adapt_start should be True"
-			# mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-			# var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
-			# linear combination of self.source_mean, self.source_var and self.running_mean, self.running_var
-			exponential_average_factor = self.momentum
-			mean, var = mean_cur, var_cur
-			# with torch.no_grad():
-				# if this is the first batch of the target domain, copy it as running mean, var
-				# else use running average calculation TODO try track number calculation
-			if self.adapt_start == False:
-				self.running_mean = mean
-				self.running_var = var
-				self.adapt_start = torch.tensor(True)
-			else:
-				self.running_mean = exponential_average_factor * mean\
-					+ (1 - exponential_average_factor) * self.running_mean
-				self.running_var = exponential_average_factor * var * n / (n - 1)\
-					+ (1 - exponential_average_factor) * self.running_var
-			mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
-			var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
+        # if batch_size > 1
+        half_first = True
+        if half_first == True:
+            if input.size(0) > 1:
+                mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
+                var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
+            else:
+                mean_cur = input.mean([0, 2, 3])
+                var_cur = input.var([0, 2, 3], unbiased=False)
+        else:
+            mean_cur = input.mean([0, 2, 3])
+            var_cur = input.var([0, 2, 3], unbiased=False)
+        # calculate running estimates
+        n = input.numel() / input.size(1)
+        if self.training:
+            mean, var = mean_cur, var_cur
+            # with torch.no_grad():
+            # 	# if this is the first batch of the target domain, copy it as running mean, var
+            # 	# else use running average calculation TODO try track number calculation
+            # 	if self.adapt_start == False:
+            # 		self.running_mean = mean
+            # 		self.running_var = var
+            # 		self.adapt_start = torch.tensor(True)
+            # 	else:
+            # 		self.running_mean = exponential_average_factor * mean\
+            # 			+ (1 - exponential_average_factor) * self.running_mean
+            # 		self.running_var = exponential_average_factor * var * n / (n - 1)\
+            # 			+ (1 - exponential_average_factor) * self.running_var
+        else:
+            # check adapt start
+            # assert self.adapt_start == True, "adapt_start should be True"
+            # mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
+            # var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+            # linear combination of self.source_mean, self.source_var and self.running_mean, self.running_var
+            exponential_average_factor = self.momentum
+            mean, var = mean_cur, var_cur
+            # with torch.no_grad():
+                # if this is the first batch of the target domain, copy it as running mean, var
+                # else use running average calculation TODO try track number calculation
+            if self.adapt_start == False:
+                self.running_mean = mean
+                self.running_var = var
+                self.adapt_start = torch.tensor(True)
+            else:
+                self.running_mean = exponential_average_factor * mean\
+                    + (1 - exponential_average_factor) * self.running_mean
+                self.running_var = exponential_average_factor * var * n / (n - 1)\
+                    + (1 - exponential_average_factor) * self.running_var
+            mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
+            var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
 
-		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
-		if self.affine:
-			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
-		return input
+        return input
 
-	def from_bn(self, bn):
-		"""copy from a normal batchnorm layer.
-		1. copy all self.xxx
-		2. create new buffer for source_mean and source_var
-		"""
-		self.__init__(
-			bn.num_features, bn.eps, bn.momentum,
-			bn.affine, bn.track_running_stats
-		)
-		# copy all self.xxx
-		self.load_state_dict(bn.state_dict())
-		# get factory_kwargs
-		factory_kwargs = {'device': bn.running_mean.device, 'dtype': bn.running_mean.dtype}
-		# create a new buffer
-		self.register_buffer('source_mean', torch.zeros(bn.num_features, **factory_kwargs))
-		self.register_buffer('source_var', torch.ones(bn.num_features, **factory_kwargs))
-		# set source as current running, set running as 0.0
-		self.source_mean.copy_(bn.running_mean)
-		self.source_var.copy_(bn.running_var)
-		# register a new buffer call adapt_start as a flag indicating whether the adaptation has started
-		self.register_buffer('adapt_start', torch.tensor(False))
-		return self
+    def from_bn(self, bn):
+        """copy from a normal batchnorm layer.
+        1. copy all self.xxx
+        2. create new buffer for source_mean and source_var
+        """
+        self.__init__(
+            bn.num_features, bn.eps, bn.momentum,
+            bn.affine, bn.track_running_stats
+        )
+        # copy all self.xxx
+        self.load_state_dict(bn.state_dict())
+        # get factory_kwargs
+        factory_kwargs = {'device': bn.running_mean.device, 'dtype': bn.running_mean.dtype}
+        # create a new buffer
+        self.register_buffer('source_mean', torch.zeros(bn.num_features, **factory_kwargs))
+        self.register_buffer('source_var', torch.ones(bn.num_features, **factory_kwargs))
+        # set source as current running, set running as 0.0
+        self.source_mean.copy_(bn.running_mean)
+        self.source_var.copy_(bn.running_var)
+        # register a new buffer call adapt_start as a flag indicating whether the adaptation has started
+        self.register_buffer('adapt_start', torch.tensor(False))
+        return self
 
 class EvalUpdateBatchNorm2d(CustomBatchNorm2d):
-	"""Combining source and target mean, var for batch normalization
+    """Combining source and target mean, var for batch normalization
 
-	The source and target mean, var are combined by a linear combination
-	source_mean, source_var is tracked as self.source_mean, self.source_var
-	target_mean, target_var is tracked as self.running_mean, self.running_var
-	so the updating of self.running_mean, self.running_var is the same
-	only combination is different
-	"""
-	def forward(self, input):
-		self._check_input_dim(input)
+    The source and target mean, var are combined by a linear combination
+    source_mean, source_var is tracked as self.source_mean, self.source_var
+    target_mean, target_var is tracked as self.running_mean, self.running_var
+    so the updating of self.running_mean, self.running_var is the same
+    only combination is different
+    """
+    def forward(self, input):
+        self._check_input_dim(input)
 
-		exponential_average_factor = 0.0
+        exponential_average_factor = 0.0
 
-		if self.training and self.track_running_stats:
-			if self.num_batches_tracked is not None:
-				# self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
-				if self.momentum is None:  # use cumulative moving average
-					exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-				else:  # use exponential moving average
-					exponential_average_factor = self.momentum
+        if self.training and self.track_running_stats:
+            if self.num_batches_tracked is not None:
+                # self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
 
-		# if batch_size > 1
-		half_first = True
-		if half_first == True:
-			if input.size(0) > 1:
-				mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
-				var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
-			else:
-				mean_cur = input.mean([0, 2, 3])
-				var_cur = input.var([0, 2, 3], unbiased=False)
-		else:
-			mean_cur = input.mean([0, 2, 3])
-			var_cur = input.var([0, 2, 3], unbiased=False)
-		# calculate running estimates
-		n = input.numel() / input.size(1)
-		if self.training:
-			# do nothing
-			mean, var = mean_cur, var_cur
-		else:
-			exponential_average_factor = self.momentum
-			mean, var = mean_cur, var_cur
-			# with torch.no_grad():
-			self.running_mean = exponential_average_factor * mean\
-				+ (1 - exponential_average_factor) * self.running_mean
-			self.running_var = exponential_average_factor * var * n / (n - 1)\
-				+ (1 - exponential_average_factor) * self.running_var
-			# mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
-			# var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
-			mean = self.running_mean
-			var = self.running_var
+        # if batch_size > 1
+        half_first = True
+        if half_first == True:
+            if input.size(0) > 1:
+                mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
+                var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
+            else:
+                mean_cur = input.mean([0, 2, 3])
+                var_cur = input.var([0, 2, 3], unbiased=False)
+        else:
+            mean_cur = input.mean([0, 2, 3])
+            var_cur = input.var([0, 2, 3], unbiased=False)
+        # calculate running estimates
+        n = input.numel() / input.size(1)
+        if self.training:
+            # do nothing
+            mean, var = mean_cur, var_cur
+        else:
+            exponential_average_factor = self.momentum
+            mean, var = mean_cur, var_cur
+            # with torch.no_grad():
+            self.running_mean = exponential_average_factor * mean\
+                + (1 - exponential_average_factor) * self.running_mean
+            self.running_var = exponential_average_factor * var * n / (n - 1)\
+                + (1 - exponential_average_factor) * self.running_var
+            # mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
+            # var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
+            mean = self.running_mean
+            var = self.running_var
 
-		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
-		if self.affine:
-			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
-		return input
+        return input
 
-	def from_bn(self, bn):
-		"""copy from a normal batchnorm layer.
-		1. copy all self.xxx
-		2. create new buffer for source_mean and source_var
-		"""
-		self.__init__(
-			bn.num_features, bn.eps, bn.momentum,
-			bn.affine, bn.track_running_stats
-		)
-		# copy all self.xxx
-		self.load_state_dict(bn.state_dict())
-		# get factory_kwargs
-		factory_kwargs = {'device': bn.running_mean.device, 'dtype': bn.running_mean.dtype}
-		# create a new buffer
-		self.register_buffer('source_mean', torch.zeros(bn.num_features, **factory_kwargs))
-		self.register_buffer('source_var', torch.ones(bn.num_features, **factory_kwargs))
-		# set source as current running, set running as 0.0
-		self.source_mean.copy_(bn.running_mean)
-		self.source_var.copy_(bn.running_var)
-		# register a new buffer call adapt_start as a flag indicating whether the adaptation has started
-		self.register_buffer('adapt_start', torch.tensor(False))
-		return self
+    def from_bn(self, bn):
+        """copy from a normal batchnorm layer.
+        1. copy all self.xxx
+        2. create new buffer for source_mean and source_var
+        """
+        self.__init__(
+            bn.num_features, bn.eps, bn.momentum,
+            bn.affine, bn.track_running_stats
+        )
+        # copy all self.xxx
+        self.load_state_dict(bn.state_dict())
+        # get factory_kwargs
+        factory_kwargs = {'device': bn.running_mean.device, 'dtype': bn.running_mean.dtype}
+        # create a new buffer
+        self.register_buffer('source_mean', torch.zeros(bn.num_features, **factory_kwargs))
+        self.register_buffer('source_var', torch.ones(bn.num_features, **factory_kwargs))
+        # set source as current running, set running as 0.0
+        self.source_mean.copy_(bn.running_mean)
+        self.source_var.copy_(bn.running_var)
+        # register a new buffer call adapt_start as a flag indicating whether the adaptation has started
+        self.register_buffer('adapt_start', torch.tensor(False))
+        return self
 
 class SIFAEvalUpdateBatchNorm2d(EvalUpdateBatchNorm2d):
-	"""Combining source and target mean, var for batch normalization
+    """Combining source and target mean, var for batch normalization
 
-	The source and target mean, var are combined by a linear combination
-	source_mean, source_var is tracked as self.source_mean, self.source_var
-	target_mean, target_var is tracked as self.running_mean, self.running_var
-	so the updating of self.running_mean, self.running_var is the same
-	only combination is different
-	"""
-	def forward(self, input):
-		self._check_input_dim(input)
+    The source and target mean, var are combined by a linear combination
+    source_mean, source_var is tracked as self.source_mean, self.source_var
+    target_mean, target_var is tracked as self.running_mean, self.running_var
+    so the updating of self.running_mean, self.running_var is the same
+    only combination is different
+    """
+    def forward(self, input):
+        self._check_input_dim(input)
 
-		exponential_average_factor = 0.0
+        exponential_average_factor = 0.0
 
-		if self.training and self.track_running_stats:
-			if self.num_batches_tracked is not None:
-				# self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
-				if self.momentum is None:  # use cumulative moving average
-					exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-				else:  # use exponential moving average
-					exponential_average_factor = self.momentum
+        if self.training and self.track_running_stats:
+            if self.num_batches_tracked is not None:
+                # self.num_batches_tracked.add_(1) # ! removed at Sept. 2022
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
 
-		# if batch_size > 1
-		half_first = True
-		if half_first == True:
-			if input.size(0) > 1:
-				mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
-				var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
-			else:
-				mean_cur = input.mean([0, 2, 3])
-				var_cur = input.var([0, 2, 3], unbiased=False)
-		else:
-			mean_cur = input.mean([0, 2, 3])
-			var_cur = input.var([0, 2, 3], unbiased=False)
-		# calculate running estimates
-		n = input.numel() / input.size(1)
-		if self.training:
-			# do nothing
-			mean, var = mean_cur, var_cur
-		else:
-			exponential_average_factor = self.momentum
-			mean, var = mean_cur, var_cur
-			# with torch.no_grad():
-			self.running_mean = exponential_average_factor * mean\
-				+ (1 - exponential_average_factor) * self.running_mean
-			self.running_var = exponential_average_factor * var * n / (n - 1)\
-				+ (1 - exponential_average_factor) * self.running_var
-			# mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
-			# var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
-			mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
-			var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
-		
-		input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
-		if self.affine:
-			input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+        # if batch_size > 1
+        half_first = True
+        if half_first == True:
+            if input.size(0) > 1:
+                mean_cur = (input[:1].mean([0, 2, 3]) + input[1:].mean([0, 2, 3])) / 2 # ! note that we should not use batch_size > 1
+                var_cur = (input[:1].var([0, 2, 3], unbiased=False) + input[1:].var([0, 2, 3], unbiased=False)) / 2
+            else:
+                mean_cur = input.mean([0, 2, 3])
+                var_cur = input.var([0, 2, 3], unbiased=False)
+        else:
+            mean_cur = input.mean([0, 2, 3])
+            var_cur = input.var([0, 2, 3], unbiased=False)
+        # calculate running estimates
+        n = input.numel() / input.size(1)
+        if self.training:
+            # do nothing
+            mean, var = mean_cur, var_cur
+        else:
+            exponential_average_factor = self.momentum
+            mean, var = mean_cur, var_cur
+            # with torch.no_grad():
+            self.running_mean = exponential_average_factor * mean\
+                + (1 - exponential_average_factor) * self.running_mean
+            self.running_var = exponential_average_factor * var * n / (n - 1)\
+                + (1 - exponential_average_factor) * self.running_var
+            # mean = self.lambda_ * self.source_mean + (1-self.lambda_) * self.running_mean
+            # var = self.lambda_ * self.source_var + (1-self.lambda_) * self.running_var
+            mean = self.lambda_ * self.running_mean + (1-self.lambda_) * mean_cur
+            var = self.lambda_ * self.running_var + (1-self.lambda_) * var_cur
+        
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
 
-		return input
+        return input
 
 @torch.jit.script
 def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
-	"""Entropy of softmax distribution from logits."""
-	temprature = 1
-	x = x/ temprature
-	x = -(x.softmax(1) * x.log_softmax(1)).sum(1)
-	x = x.flatten(1).mean(1)
-	return x
+    """Entropy of softmax distribution from logits."""
+    temprature = 1
+    x = x/ temprature
+    x = -(x.softmax(1) * x.log_softmax(1)).sum(1)
+    x = x.flatten(1).mean(1)
+    return x
 
 def cross_entropy_2d(predict, target):
-	"""
-	Args:
-		predict:(n, c, h, w)
-		target:(n, h, w)
-	"""
-	assert not target.requires_grad
-	assert predict.dim() == 4
-	assert target.dim() == 3
-	assert predict.size(0) == target.size(0), f"{predict.size(0)} vs {target.size(0)}"
-	assert predict.size(2) == target.size(1), f"{predict.size(2)} vs {target.size(1)}"
-	assert predict.size(3) == target.size(2), f"{predict.size(3)} vs {target.size(3)}"
-	n, c, h, w = predict.size()
-	target_mask = (target >= 0) * (target != 255)
-	target = target[target_mask]
-	if not target.data.dim():
-		return Variable(torch.zeros(1))
-	predict = predict.transpose(1, 2).transpose(2, 3).contiguous()
-	predict = predict[target_mask.view(n, h, w, 1).repeat(1, 1, 1, c)].view(-1, c)
-	loss = F.cross_entropy(predict, target.long(), reduction="mean")
-	return loss
+    """
+    Args:
+        predict:(n, c, h, w)
+        target:(n, h, w)
+    """
+    assert not target.requires_grad
+    assert predict.dim() == 4
+    assert target.dim() == 3
+    assert predict.size(0) == target.size(0), f"{predict.size(0)} vs {target.size(0)}"
+    assert predict.size(2) == target.size(1), f"{predict.size(2)} vs {target.size(1)}"
+    assert predict.size(3) == target.size(2), f"{predict.size(3)} vs {target.size(3)}"
+    n, c, h, w = predict.size()
+    target_mask = (target >= 0) * (target != 255)
+    target = target[target_mask]
+    if not target.data.dim():
+        return Variable(torch.zeros(1))
+    predict = predict.transpose(1, 2).transpose(2, 3).contiguous()
+    predict = predict[target_mask.view(n, h, w, 1).repeat(1, 1, 1, c)].view(-1, c)
+    loss = F.cross_entropy(predict, target.long(), reduction="mean")
+    return loss
 
 def collect_model_params(model, type=None):
-	""" Collect parameters from model, if type is not None, only collect parameters with type
-	Args:
-		model: model to collect parameters
-		type: "bn_all" "bn_weight_bias" "bn_lambda" "bn", "classifier", "classifier_last_layer", "all"
-	"""
-	if type is None: raise ValueError('type should be specified')
-	if type == "all": 
-		res = collect_all_params(model)
-	elif type in ["bn", "bn_all"]:
-		res = collect_bn_params(model, set_=["weight", "bias", "lambda_"])
-	elif type == "bn_weight_bias":
-		res = collect_bn_params(model, set_=["weight", "bias"])
-	elif type == "bn_lambda":
-		res = collect_bn_params(model, set_=["lambda_"])
-	elif type == "classifier":
-		res = collect_classifier_params(model)
-	elif type == "classifier_last_layer":
-		res = collect_classifier_last_layer_params(model)
-	else:
-		raise ValueError("type should be one of [bn, bn_all, bn_weight_bias, bn_lambda, classifier, classifier_last_layer, all]")
-	return res
+    """ Collect parameters from model, if type is not None, only collect parameters with type
+    Args:
+        model: model to collect parameters
+        type: "bn_all" "bn_weight_bias" "bn_lambda" "bn", "classifier", "classifier_last_layer", "all"
+    """
+    if type is None: raise ValueError('type should be specified')
+    if type == "all": 
+        res = collect_all_params(model)
+    elif type in ["bn", "bn_all"]:
+        res = collect_bn_params(model, set_=["weight", "bias", "lambda_"])
+    elif type == "bn_weight_bias":
+        res = collect_bn_params(model, set_=["weight", "bias"])
+    elif type == "bn_lambda":
+        res = collect_bn_params(model, set_=["lambda_"])
+    elif type == "classifier":
+        res = collect_classifier_params(model)
+    elif type == "classifier_last_layer":
+        res = collect_classifier_last_layer_params(model)
+    else:
+        raise ValueError("type should be one of [bn, bn_all, bn_weight_bias, bn_lambda, classifier, classifier_last_layer, all]")
+    return res
 
 def collect_all_params(model):
-	""" Collect all parameters from model
-	Args:
-		model: model to collect parameters
-	"""
-	params = []
-	names = []
-	for name, param in model.named_parameters():
-		params.append(param)
-		names.append(name)
-	return params, names
+    """ Collect all parameters from model
+    Args:
+        model: model to collect parameters
+    """
+    params = []
+    names = []
+    for name, param in model.named_parameters():
+        params.append(param)
+        names.append(name)
+    return params, names
 
 def collect_bn_params(model, set_=['weight', 'bias','lambda_']):
-	"""Collect the affine scale + shift parameters from batch norms.
-	Walk the model's modules and collect all batch normalization parameters.
-	Return the parameters and their names.
-	Note: other choices of parameterization are possible!
-	"""
-	params = []
-	names = []
-	for nm, m in model.named_modules():
-		if isinstance(m, nn.BatchNorm2d):
-			for np, p in m.named_parameters():
-				if np in set_: # TODO lambda_ is manually added
-					params.append(p)
-					names.append(f"{nm}.{np}")
-	return params, names
+    """Collect the affine scale + shift parameters from batch norms.
+    Walk the model's modules and collect all batch normalization parameters.
+    Return the parameters and their names.
+    Note: other choices of parameterization are possible!
+    """
+    params = []
+    names = []
+    for nm, m in model.named_modules():
+        if isinstance(m, nn.BatchNorm2d):
+            for np, p in m.named_parameters():
+                if np in set_: # TODO lambda_ is manually added
+                    params.append(p)
+                    names.append(f"{nm}.{np}")
+    return params, names
 
 def collect_bn_all(model):
-	return collect_bn_params(model, set=['weight', 'bias', 'running_mean', 'running_var', 'lambda_'])
+    return collect_bn_params(model, set=['weight', 'bias', 'running_mean', 'running_var', 'lambda_'])
 
 def collect_bn_lambda_(model):
-	return collect_bn_params(model, set=['lambda_'])
+    return collect_bn_params(model, set=['lambda_'])
 
 def collect_bn_weight_bias(model):
-	return collect_bn_params(model, set=['weight', 'bias'])
+    return collect_bn_params(model, set=['weight', 'bias'])
 
 def collect_classifier_params(model):
-	"""Collect the last module in the model.
-	"""
-	params = []
-	names = []
-	for nm, m in model.named_modules():
-		if m.__class__.__name__ == "Classifier_Module":
-			for np, p in m.named_parameters():
-				params.append(p)
-				names.append(f"{nm}.{np}")
-	return params, names
+    """Collect the last module in the model.
+    """
+    params = []
+    names = []
+    for nm, m in model.named_modules():
+        if m.__class__.__name__ == "Classifier_Module":
+            for np, p in m.named_parameters():
+                params.append(p)
+                names.append(f"{nm}.{np}")
+    return params, names
 
 def collect_classifier_last_layer_params(model):
-	"""Collect the last module in the model.
-	"""
-	params = []
-	names = []
-	for nm, m in model.named_modules():
-		if m.__class__.__name__ == "Classifier_Module":
-			# collect params of the last layer in m
-			for m in reversed(list(m.modules())):
-				if isinstance(m, nn.Conv2d):
-					for np, p in m.named_parameters():
-						params.append(p)
-						names.append(f"{nm}.{np}")
-				break
-	return params, names
+    """Collect the last module in the model.
+    """
+    params = []
+    names = []
+    for nm, m in model.named_modules():
+        if m.__class__.__name__ == "Classifier_Module":
+            # collect params of the last layer in m
+            for m in reversed(list(m.modules())):
+                if isinstance(m, nn.Conv2d):
+                    for np, p in m.named_parameters():
+                        params.append(p)
+                        names.append(f"{nm}.{np}")
+                break
+    return params, names
 
 def collect_last_layer_in_last_module_params(model):
-	"""Collect the last layer in the model.
-	"""
-	for m in reversed(list(model.modules())):
-		if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-			return m
-	raise ValueError("Model does not have a last layer")
+    """Collect the last layer in the model.
+    """
+    for m in reversed(list(model.modules())):
+        if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+            return m
+    raise ValueError("Model does not have a last layer")
 
 class Bottleneck(nn.Module):
-	expansion = 4
+    expansion = 4
 
-	def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None):
-		super().__init__()
-		# change
-		self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, stride=stride, bias=False)
-		self.bn1 = nn.BatchNorm2d(planes, affine=affine_par)
-		for i in self.bn1.parameters():
-			i.requires_grad = False
-		padding = dilation
-		# change
-		self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1,
-							   padding=padding, bias=False, dilation=dilation)
-		self.bn2 = nn.BatchNorm2d(planes, affine=affine_par)
-		for i in self.bn2.parameters():
-			i.requires_grad = False
-		self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
-		self.bn3 = nn.BatchNorm2d(planes * 4, affine=affine_par)
-		for i in self.bn3.parameters():
-			i.requires_grad = False
-		self.relu = nn.ReLU(inplace=True)
-		self.downsample = downsample
-		self.stride = stride
+    def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None):
+        super().__init__()
+        # change
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, stride=stride, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes, affine=affine_par)
+        for i in self.bn1.parameters():
+            i.requires_grad = False
+        padding = dilation
+        # change
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1,
+                               padding=padding, bias=False, dilation=dilation)
+        self.bn2 = nn.BatchNorm2d(planes, affine=affine_par)
+        for i in self.bn2.parameters():
+            i.requires_grad = False
+        self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * 4, affine=affine_par)
+        for i in self.bn3.parameters():
+            i.requires_grad = False
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
 
-	def forward(self, x):
-		residual = x
-		out = self.conv1(x)
-		out = self.bn1(out)
-		out = self.relu(out)
-		out = self.conv2(out)
-		out = self.bn2(out)
-		out = self.relu(out)
-		out = self.conv3(out)
-		out = self.bn3(out)
-		if self.downsample is not None:
-			residual = self.downsample(x)
-		out += residual
-		out = self.relu(out)
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+        out = self.conv3(out)
+        out = self.bn3(out)
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        out += residual
+        out = self.relu(out)
 
-		return out
+        return out
 
 class ClassifierModule(nn.Module):
-	def __init__(self, inplanes, dilation_series, padding_series, num_classes):
-		super(ClassifierModule, self).__init__()
-		self.conv2d_list = nn.ModuleList()
-		for dilation, padding in zip(dilation_series, padding_series):
-			self.conv2d_list.append(
-				nn.Conv2d(inplanes, num_classes, kernel_size=3, stride=1, padding=padding,
-						  dilation=dilation, bias=True))
+    def __init__(self, inplanes, dilation_series, padding_series, num_classes):
+        super(ClassifierModule, self).__init__()
+        self.conv2d_list = nn.ModuleList()
+        for dilation, padding in zip(dilation_series, padding_series):
+            self.conv2d_list.append(
+                nn.Conv2d(inplanes, num_classes, kernel_size=3, stride=1, padding=padding,
+                          dilation=dilation, bias=True))
 
-		for m in self.conv2d_list:
-			m.weight.data.normal_(0, 0.01)
+        for m in self.conv2d_list:
+            m.weight.data.normal_(0, 0.01)
 
-	def forward(self, x):
-		out = self.conv2d_list[0](x)
-		for i in range(len(self.conv2d_list) - 1):
-			out += self.conv2d_list[i + 1](x)
-		return out
+    def forward(self, x):
+        out = self.conv2d_list[0](x)
+        for i in range(len(self.conv2d_list) - 1):
+            out += self.conv2d_list[i + 1](x)
+        return out
 
 class ResNetMulti(nn.Module):
-	def __init__(self, block, layers, num_classes, multi_level, output_size=(224, 224)):
-		self.multi_level = multi_level
-		self.inplanes = 64
-		super(ResNetMulti, self).__init__()
-		self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
-							   bias=False)
-		self.bn1 = nn.BatchNorm2d(64, affine=affine_par)
-		for i in self.bn1.parameters():
-			i.requires_grad = False
-		self.relu = nn.ReLU(inplace=True)
-		self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=True)  # change
-		self.layer1 = self._make_layer(block, 64, layers[0])
-		self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-		self.layer3 = self._make_layer(block, 256, layers[2], stride=1, dilation=2)
-		self.layer4 = self._make_layer(block, 512, layers[3], stride=1, dilation=4)
-		if self.multi_level:
-			self.layer5 = ClassifierModule(1024, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
-		self.layer6 = ClassifierModule(2048, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
-		for m in self.modules():
-			if isinstance(m, nn.Conv2d):
-				m.weight.data.normal_(0, 0.01)
-			elif isinstance(m, nn.BatchNorm2d):
-				m.weight.data.fill_(1)
-				m.bias.data.zero_()
-		self.output_size = output_size
+    def __init__(self, block, layers, num_classes, multi_level, output_size=(224, 224)):
+        self.multi_level = multi_level
+        self.inplanes = 64
+        super(ResNetMulti, self).__init__()
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(64, affine=affine_par)
+        for i in self.bn1.parameters():
+            i.requires_grad = False
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=True)  # change
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=1, dilation=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=1, dilation=4)
+        if self.multi_level:
+            self.layer5 = ClassifierModule(1024, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
+        self.layer6 = ClassifierModule(2048, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                m.weight.data.normal_(0, 0.01)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+        self.output_size = output_size
 
-	def _make_layer(self, block, planes, blocks, stride=1, dilation=1):
-		downsample = None
-		if (stride != 1
-				or self.inplanes != planes * block.expansion
-				or dilation == 2
-				or dilation == 4):
-			downsample = nn.Sequential(
-				nn.Conv2d(self.inplanes, planes * block.expansion,
-						  kernel_size=1, stride=stride, bias=False),
-				nn.BatchNorm2d(planes * block.expansion, affine=affine_par))
-		for i in downsample._modules['1'].parameters():
-			i.requires_grad = False
-		layers = []
-		layers.append(
-			block(self.inplanes, planes, stride, dilation=dilation, downsample=downsample))
-		self.inplanes = planes * block.expansion
-		for i in range(1, blocks):
-			layers.append(block(self.inplanes, planes, dilation=dilation))
+    def _make_layer(self, block, planes, blocks, stride=1, dilation=1):
+        downsample = None
+        if (stride != 1
+                or self.inplanes != planes * block.expansion
+                or dilation == 2
+                or dilation == 4):
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion, affine=affine_par))
+        for i in downsample._modules['1'].parameters():
+            i.requires_grad = False
+        layers = []
+        layers.append(
+            block(self.inplanes, planes, stride, dilation=dilation, downsample=downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes, dilation=dilation))
 
-		return nn.Sequential(*layers)
+        return nn.Sequential(*layers)
 
-	def forward(self, x):
-		x = self.conv1(x)
-		x = self.bn1(x)
-		x = self.relu(x)
-		x = self.maxpool(x)
-		x = self.layer1(x)
-		x = self.layer2(x)
-		x = self.layer3(x)
-		if self.multi_level:
-			x1 = self.layer5(x)  # produce segmap 1
-		else:
-			x1 = None # TODO multi level?
-		x2 = self.layer4(x)
-		x2 = self.layer6(x2)  # produce segmap 2
-		inter = nn.Upsample(size=tuple(self.output_size), mode='bilinear',
-								align_corners=True)
-		x1, x2 = inter(x1), inter(x2)			
-		return x1, x2 # TODO check use x2
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        if self.multi_level:
+            x1 = self.layer5(x)  # produce segmap 1
+        else:
+            x1 = None # TODO multi level?
+            x2 = self.layer4(x)
+            x2 = self.layer6(x2)  # produce segmap 2
+            inter = nn.Upsample(size=tuple(self.output_size), mode='bilinear',
+                                    align_corners=True)
+            x1, x2 = inter(x1), inter(x2)			
+        return x1, x2 # TODO check use x2
 
-	def get_1x_lr_params_no_scale(self):
-		"""
-		This generator returns all the parameters of the net except for
-		the last classification layer. Note that for each batchnorm layer,
-		requires_grad is set to False in deeplab_resnet.py, therefore this function does not return
-		any batchnorm parameter
-		"""
-		b = []
+    def get_1x_lr_params_no_scale(self):
+        """
+        This generator returns all the parameters of the net except for
+        the last classification layer. Note that for each batchnorm layer,
+        requires_grad is set to False in deeplab_resnet.py, therefore this function does not return
+        any batchnorm parameter
+        """
+        b = []
 
-		b.append(self.conv1)
-		b.append(self.bn1)
-		b.append(self.layer1)
-		b.append(self.layer2)
-		b.append(self.layer3)
-		b.append(self.layer4)
+        b.append(self.conv1)
+        b.append(self.bn1)
+        b.append(self.layer1)
+        b.append(self.layer2)
+        b.append(self.layer3)
+        b.append(self.layer4)
 
-		for i in range(len(b)):
-			for j in b[i].modules():
-				jj = 0
-				for k in j.parameters():
-					jj += 1
-					if k.requires_grad:
-						yield k
+        for i in range(len(b)):
+            for j in b[i].modules():
+                jj = 0
+                for k in j.parameters():
+                    jj += 1
+                    if k.requires_grad:
+                        yield k
 
-	def get_10x_lr_params(self):
-		"""
-		This generator returns all the parameters for the last layer of the net,
-		which does the classification of pixel into classes
-		"""
-		b = []
-		if self.multi_level:
-			b.append(self.layer5.parameters())
-		b.append(self.layer6.parameters())
+    def get_10x_lr_params(self):
+        """
+        This generator returns all the parameters for the last layer of the net,
+        which does the classification of pixel into classes
+        """
+        b = []
+        if self.multi_level:
+            b.append(self.layer5.parameters())
+        b.append(self.layer6.parameters())
 
-		for j in range(len(b)):
-			for i in b[j]:
-				yield i
+        for j in range(len(b)):
+            for i in b[j]:
+                yield i
 
-	def optim_parameters(self, lr):
-		return [{'params': self.get_1x_lr_params_no_scale(), 'lr': lr},
-				{'params': self.get_10x_lr_params(), 'lr': 10 * lr}]
+    def optim_parameters(self, lr):
+        return [{'params': self.get_1x_lr_params_no_scale(), 'lr': lr},
+                {'params': self.get_10x_lr_params(), 'lr': 10 * lr}]
 
 def get_deeplab_v2(num_classes=19, multi_level=True):
-	model = ResNetMulti(Bottleneck, [3, 4, 23, 3], num_classes, multi_level) # TODO class num ? = 19?
-	return model
+    model = ResNetMulti(Bottleneck, [3, 4, 23, 3], num_classes, multi_level) # TODO class num ? = 19?
+    return model
 
 class DeepLabv2(ResNetMulti):
-	def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
-		super().__init__(Bottleneck, [3, 4, 23, 3], num_classes, multi_level, output_size)
-		self.num_classes = num_classes
-		if restore_from is not None:
-			self.restore_from = restore_from
-			self.restore()
+    def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
+        super().__init__(Bottleneck, [3, 4, 23, 3], num_classes, multi_level, output_size)
+        self.num_classes = num_classes
+        if restore_from is not None:
+            self.restore_from = restore_from
+            self.restore()
 
-	def restore(self):
-		if hasattr(self, 'restore_from'):
-			restore_from = self.restore_from
-			saved_state_dict = torch.load(restore_from)
-			if 'state_dict' in saved_state_dict.keys():
-				saved_state_dict = saved_state_dict['state_dict']
-			if "layer" in tuple(saved_state_dict.keys())[-1].split(".")[1]: 
-				start = 1
-			elif "layer" in tuple(saved_state_dict.keys())[-1].split(".")[0]:
-				start = 0
-			else:
-				raise ValueError("Can not find layer start.")
-			new_params = self.state_dict().copy()
-			for i in saved_state_dict: # e.g. self.net.layer3.8.bn1.running_mean -> layer3.8.bn1.running_mean
-				i_parts = i.split('.')
-				if not self.num_classes == 19 or not i_parts[start] == 'layer5':
-					new_params['.'.join(i_parts[start:])] = saved_state_dict[i]
-			self.load_state_dict(new_params)
+    def restore(self):
+        if hasattr(self, 'restore_from'):
+            restore_from = self.restore_from
+            saved_state_dict = torch.load(restore_from)
+            if 'state_dict' in saved_state_dict.keys():
+                saved_state_dict = saved_state_dict['state_dict']
+            if "layer" in tuple(saved_state_dict.keys())[-1].split(".")[1]: 
+                start = 1
+            elif "layer" in tuple(saved_state_dict.keys())[-1].split(".")[0]:
+                start = 0
+            else:
+                raise ValueError("Can not find layer start.")
+            new_params = self.state_dict().copy()
+            for i in saved_state_dict: # e.g. self.net.layer3.8.bn1.running_mean -> layer3.8.bn1.running_mean
+                i_parts = i.split('.')
+                if not self.num_classes == 19 or not i_parts[start] == 'layer5':
+                    new_params['.'.join(i_parts[start:])] = saved_state_dict[i]
+            self.load_state_dict(new_params)
 
 class DeepLabv2AdaptSeg(adaptseg.ResNetMulti):
-	def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
-		super().__init__(adaptseg.Bottleneck, [3, 4, 23, 3], num_classes)
-		self.num_classes = num_classes
-		if restore_from is not None:
-			self.restore_from = restore_from
-			self.restore()
+    def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
+        super().__init__(adaptseg.Bottleneck, [3, 4, 23, 3], num_classes)
+        self.num_classes = num_classes
+        if restore_from is not None:
+            self.restore_from = restore_from
+            self.restore()
 
-	def restore(self):
-		if hasattr(self, 'restore_from'):
-			# laod pretrained model parameters
-			if self.restore_from[:4] == 'http' :
-				saved_state_dict = model_zoo.load_url(self.restore_from)
-			else:
-				saved_state_dict = torch.load(self.restore_from)
-			# replace new model parameters with pretrained model parameters
-			if 'imagenet' in self.restore_from.split("/")[-1] or "resnet" in self.restore_from.split("/")[-1]:
-				self.load_imagenet_pretrained(saved_state_dict)
-			elif 'Cityscapes_source_class13' in self.restore_from.split("/")[-1]:
-				self.load_13_pretrained(saved_state_dict["state_dict"])
-			elif 'cityscapesbest' in self.restore_from.split("/")[-1] or "models/MaxSquareLoss" in self.restore_from:
-				self.load_imagenet_pretrained(saved_state_dict["state_dict"])
-			elif 'source' in self.restore_from.split("/")[-1]:
-				self.load_source_pretrained(saved_state_dict)
-			elif 'my' in self.restore_from.split("/")[-1]:
-				self.load_imagenet_pretrained(saved_state_dict['state_dict'])
-			elif 'baseline' in self.restore_from.split("/")[-1] or 'dl' in self.restore_from.split("/")[-1]:
-				self.load_baseline_pretrained(saved_state_dict)
-			else:
-				raise ValueError("Can not find pretrained model type.")
+    def restore(self):
+        if hasattr(self, 'restore_from'):
+            # laod pretrained model parameters
+            if self.restore_from[:4] == 'http' :
+                saved_state_dict = model_zoo.load_url(self.restore_from)
+            else:
+                saved_state_dict = torch.load(self.restore_from)
+            # replace new model parameters with pretrained model parameters
+            if 'imagenet' in self.restore_from.split("/")[-1] or "resnet" in self.restore_from.split("/")[-1]:
+                self.load_imagenet_pretrained(saved_state_dict)
+            elif 'Cityscapes_source_class13' in self.restore_from.split("/")[-1]:
+                self.load_13_pretrained(saved_state_dict["state_dict"])
+            elif 'cityscapesbest' in self.restore_from.split("/")[-1] or "models/MaxSquareLoss" in self.restore_from:
+                self.load_imagenet_pretrained(saved_state_dict["state_dict"])
+            elif 'source' in self.restore_from.split("/")[-1]:
+                self.load_source_pretrained(saved_state_dict)
+            elif 'my' in self.restore_from.split("/")[-1]:
+                self.load_imagenet_pretrained(saved_state_dict['state_dict'])
+            elif 'baseline' in self.restore_from.split("/")[-1] or 'dl' in self.restore_from.split("/")[-1]:
+                self.load_baseline_pretrained(saved_state_dict)
+            else:
+                raise ValueError("Can not find pretrained model type.")
 
-	def load_imagenet_pretrained(self, saved_state_dict):
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			# Scale.layer5.conv2d_list.3.weight
-			i_parts = i.split('.')
-			if not self.num_classes == 19 or not i_parts[1] == 'layer5':
-				new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
-		self.load_state_dict(new_params)
+    def load_imagenet_pretrained(self, saved_state_dict):
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            # Scale.layer5.conv2d_list.3.weight
+            i_parts = i.split('.')
+            if not self.num_classes == 19 or not i_parts[1] == 'layer5':
+                new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+        self.load_state_dict(new_params)
 
-	def load_13_pretrained(self, saved_state_dict):
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			# Scale.layer5.conv2d_list.3.weight
-			i_parts = i.split('.')
-			if i_parts[1] == 'layer6':
-				# i = module.layer6.conv2d_list.0.weight # shape = [13, 2048, 3, 3] or [13,]
-				# turn 13 into 19
-				new_params['.'.join(i_parts[1:])] = self._param_13_to_19(saved_state_dict[i])
-			elif not self.num_classes == 19 or not i_parts[1] == 'layer5':
-				new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
-		self.load_state_dict(new_params)
-	
-	def load_source_pretrained(self, saved_state_dict):
-		model_dict = self.state_dict()
-		saved_state_dict = {k: v for k, v in saved_state_dict.items() if k in model_dict}
-		model_dict.update(saved_state_dict)
-		self.load_state_dict(saved_state_dict)
-		return
+    def load_13_pretrained(self, saved_state_dict):
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            # Scale.layer5.conv2d_list.3.weight
+            i_parts = i.split('.')
+            if i_parts[1] == 'layer6':
+                # i = module.layer6.conv2d_list.0.weight # shape = [13, 2048, 3, 3] or [13,]
+                # turn 13 into 19
+                new_params['.'.join(i_parts[1:])] = self._param_13_to_19(saved_state_dict[i])
+            elif not self.num_classes == 19 or not i_parts[1] == 'layer5':
+                new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+        self.load_state_dict(new_params)
+    
+    def load_source_pretrained(self, saved_state_dict):
+        model_dict = self.state_dict()
+        saved_state_dict = {k: v for k, v in saved_state_dict.items() if k in model_dict}
+        model_dict.update(saved_state_dict)
+        self.load_state_dict(saved_state_dict)
+        return
 
-	def load_baseline_pretrained(self, saved_state_dict):
-		"""
-		miss layer 6, the name is layer5
-		format: layer5.conv2d_list.3.weight
-		"""
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			i_parts = i.split('.')
-			if i_parts[0] == 'layer5':
-				new_params['.'.join(['layer6'] + i_parts[1:])] = saved_state_dict[i]
-			elif (not i_parts[0] == 'layer5') and "layer" in i_parts[0]:
-				new_params['.'.join(i_parts[0:])] = saved_state_dict[i]
-			elif i in new_params.keys():
-				new_params[i] = saved_state_dict[i]
-			else:
-				raise ValueError("Can not find pretrained model type.")
-		self.load_state_dict(new_params)
+    def load_baseline_pretrained(self, saved_state_dict):
+        """
+        miss layer 6, the name is layer5
+        format: layer5.conv2d_list.3.weight
+        """
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            i_parts = i.split('.')
+            if i_parts[0] == 'layer5':
+                new_params['.'.join(['layer6'] + i_parts[1:])] = saved_state_dict[i]
+            elif (not i_parts[0] == 'layer5') and "layer" in i_parts[0]:
+                new_params['.'.join(i_parts[0:])] = saved_state_dict[i]
+            elif i in new_params.keys():
+                new_params[i] = saved_state_dict[i]
+            else:
+                raise ValueError("Can not find pretrained model type.")
+        self.load_state_dict(new_params)
 
-	def _param_13_to_19(self, param):
-		""" convert 13 class to 19 class
-		the class index is 
-			19: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
-			16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]
-			13: [0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]
-			fill non exist class with 0
-		input: param, shape = [13, 2048, 3, 3] or [13,]
-		return: param, shape = [19, 2048, 3, 3] or [19,]
+    def _param_13_to_19(self, param):
+        """ convert 13 class to 19 class
+        the class index is 
+            19: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]
+            13: [0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]
+            fill non exist class with 0
+        input: param, shape = [13, 2048, 3, 3] or [13,]
+        return: param, shape = [19, 2048, 3, 3] or [19,]
 
-		"""
-		res = torch.zeros(19, *param.shape[1:]).to(param.device)
-		res[0] = param[0]
-		res[1] = param[1]
-		res[2] = param[2]
-		res[6] = param[3]
-		res[7] = param[4]
-		res[8] = param[5]
-		res[10] = param[6]
-		res[11] = param[7]
-		res[12] = param[8]
-		res[13] = param[9]
-		res[15] = param[10]
-		res[17] = param[11]
-		res[18] = param[12]
-		return res
+        """
+        res = torch.zeros(19, *param.shape[1:]).to(param.device)
+        res[0] = param[0]
+        res[1] = param[1]
+        res[2] = param[2]
+        res[6] = param[3]
+        res[7] = param[4]
+        res[8] = param[5]
+        res[10] = param[6]
+        res[11] = param[7]
+        res[12] = param[8]
+        res[13] = param[9]
+        res[15] = param[10]
+        res[17] = param[11]
+        res[18] = param[12]
+        return res
 
 class DeeplabVGG(adaptseg.DeeplabVGG):
-	def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
-		super().__init__(num_classes)
-		tmp = (adaptseg.Bottleneck, [3, 4, 23, 3])
-		self.num_classes = num_classes
-		if restore_from is not None:
-			self.restore_from = restore_from
-			self.restore()
+    def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
+        super().__init__(num_classes)
+        tmp = (adaptseg.Bottleneck, [3, 4, 23, 3])
+        self.num_classes = num_classes
+        if restore_from is not None:
+            self.restore_from = restore_from
+            self.restore()
 
-	def restore(self):
-		if hasattr(self, 'restore_from'):
-			# laod pretrained model parameters
-			if self.restore_from[:4] == 'http' :
-				saved_state_dict = model_zoo.load_url(self.restore_from)
-			else:
-				saved_state_dict = torch.load(self.restore_from)
-			# replace new model parameters with pretrained model parameters
-			if 'imagenet' in self.restore_from.split("/")[-1] or "resnet" in self.restore_from.split("/")[-1]:
-				self.load_imagenet_pretrained(saved_state_dict)
-			elif 'Cityscapes_source_class13' in self.restore_from.split("/")[-1]:
-				self.load_13_pretrained(saved_state_dict["state_dict"])
-			elif 'cityscapesbest' in self.restore_from.split("/")[-1] or "models/MaxSquareLoss" in self.restore_from:
-				self.load_imagenet_pretrained(saved_state_dict["state_dict"])
-			elif 'source' in self.restore_from.split("/")[-1]:
-				self.load_source_pretrained(saved_state_dict)
-			elif 'my' in self.restore_from.split("/")[-1]:
-				self.load_imagenet_pretrained(saved_state_dict['state_dict'])
-			elif 'baseline' in self.restore_from.split("/")[-1] or 'dl' in self.restore_from.split("/")[-1]:
-				self.load_baseline_pretrained(saved_state_dict)
-			else:
-				raise ValueError("Can not find pretrained model type.")
+    def restore(self):
+        if hasattr(self, 'restore_from'):
+            # laod pretrained model parameters
+            if self.restore_from[:4] == 'http' :
+                saved_state_dict = model_zoo.load_url(self.restore_from)
+            else:
+                saved_state_dict = torch.load(self.restore_from)
+            # replace new model parameters with pretrained model parameters
+            if 'imagenet' in self.restore_from.split("/")[-1] or "resnet" in self.restore_from.split("/")[-1]:
+                self.load_imagenet_pretrained(saved_state_dict)
+            elif 'Cityscapes_source_class13' in self.restore_from.split("/")[-1]:
+                self.load_13_pretrained(saved_state_dict["state_dict"])
+            elif 'cityscapesbest' in self.restore_from.split("/")[-1] or "models/MaxSquareLoss" in self.restore_from:
+                self.load_imagenet_pretrained(saved_state_dict["state_dict"])
+            elif 'source' in self.restore_from.split("/")[-1]:
+                self.load_source_pretrained(saved_state_dict)
+            elif 'my' in self.restore_from.split("/")[-1]:
+                self.load_imagenet_pretrained(saved_state_dict['state_dict'])
+            elif 'baseline' in self.restore_from.split("/")[-1] or 'dl' in self.restore_from.split("/")[-1]:
+                self.load_baseline_pretrained(saved_state_dict)
+            else:
+                raise ValueError("Can not find pretrained model type.")
 
-	def load_imagenet_pretrained(self, saved_state_dict):
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			# Scale.layer5.conv2d_list.3.weight
-			i_parts = i.split('.')
-			if not self.num_classes == 19 or not i_parts[1] == 'layer5':
-				new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
-		self.load_state_dict(new_params)
+    def load_imagenet_pretrained(self, saved_state_dict):
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            # Scale.layer5.conv2d_list.3.weight
+            i_parts = i.split('.')
+            if not self.num_classes == 19 or not i_parts[1] == 'layer5':
+                new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+        self.load_state_dict(new_params)
 
-	def load_13_pretrained(self, saved_state_dict):
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			# Scale.layer5.conv2d_list.3.weight
-			i_parts = i.split('.')
-			if i_parts[1] == 'layer6':
-				# i = module.layer6.conv2d_list.0.weight # shape = [13, 2048, 3, 3] or [13,]
-				# turn 13 into 19
-				new_params['.'.join(i_parts[1:])] = self._param_13_to_19(saved_state_dict[i])
-			elif not self.num_classes == 19 or not i_parts[1] == 'layer5':
-				new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
-		self.load_state_dict(new_params)
-	
-	def load_source_pretrained(self, saved_state_dict):
-		model_dict = self.state_dict()
-		saved_state_dict = {k: v for k, v in saved_state_dict.items() if k in model_dict}
-		model_dict.update(saved_state_dict)
-		self.load_state_dict(saved_state_dict)
-		return
+    def load_13_pretrained(self, saved_state_dict):
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            # Scale.layer5.conv2d_list.3.weight
+            i_parts = i.split('.')
+            if i_parts[1] == 'layer6':
+                # i = module.layer6.conv2d_list.0.weight # shape = [13, 2048, 3, 3] or [13,]
+                # turn 13 into 19
+                new_params['.'.join(i_parts[1:])] = self._param_13_to_19(saved_state_dict[i])
+            elif not self.num_classes == 19 or not i_parts[1] == 'layer5':
+                new_params['.'.join(i_parts[1:])] = saved_state_dict[i]
+        self.load_state_dict(new_params)
+    
+    def load_source_pretrained(self, saved_state_dict):
+        model_dict = self.state_dict()
+        saved_state_dict = {k: v for k, v in saved_state_dict.items() if k in model_dict}
+        model_dict.update(saved_state_dict)
+        self.load_state_dict(saved_state_dict)
+        return
 
-	def load_baseline_pretrained(self, saved_state_dict):
-		"""
-		miss layer 6, the name is layer5
-		format: layer5.conv2d_list.3.weight
-		"""
-		new_params = self.state_dict().copy()
-		for i in saved_state_dict:
-			i_parts = i.split('.')
-			if i_parts[0] == 'layer5':
-				new_params['.'.join(['layer6'] + i_parts[1:])] = saved_state_dict[i]
-			elif (not i_parts[0] == 'layer5') and "layer" in i_parts[0]:
-				new_params['.'.join(i_parts[0:])] = saved_state_dict[i]
-			elif i in new_params.keys():
-				new_params[i] = saved_state_dict[i]
-			else:
-				raise ValueError("Can not find pretrained model type.")
-		self.load_state_dict(new_params)
+    def load_baseline_pretrained(self, saved_state_dict):
+        """
+        miss layer 6, the name is layer5
+        format: layer5.conv2d_list.3.weight
+        """
+        new_params = self.state_dict().copy()
+        for i in saved_state_dict:
+            i_parts = i.split('.')
+            if i_parts[0] == 'layer5':
+                new_params['.'.join(['layer6'] + i_parts[1:])] = saved_state_dict[i]
+            elif (not i_parts[0] == 'layer5') and "layer" in i_parts[0]:
+                new_params['.'.join(i_parts[0:])] = saved_state_dict[i]
+            elif i in new_params.keys():
+                new_params[i] = saved_state_dict[i]
+            else:
+                raise ValueError("Can not find pretrained model type.")
+        self.load_state_dict(new_params)
 
-	def _param_13_to_19(self, param):
-		""" convert 13 class to 19 class
-		the class index is 
-			19: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
-			16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]
-			13: [0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]
-			fill non exist class with 0
-		input: param, shape = [13, 2048, 3, 3] or [13,]
-		return: param, shape = [19, 2048, 3, 3] or [19,]
+    def _param_13_to_19(self, param):
+        """ convert 13 class to 19 class
+        the class index is 
+            19: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 17]
+            13: [0, 1, 2, 6, 7, 8, 10, 11, 12, 13, 15, 17]
+            fill non exist class with 0
+        input: param, shape = [13, 2048, 3, 3] or [13,]
+        return: param, shape = [19, 2048, 3, 3] or [19,]
 
-		"""
-		res = torch.zeros(19, *param.shape[1:]).to(param.device)
-		res[0] = param[0]
-		res[1] = param[1]
-		res[2] = param[2]
-		res[6] = param[3]
-		res[7] = param[4]
-		res[8] = param[5]
-		res[10] = param[6]
-		res[11] = param[7]
-		res[12] = param[8]
-		res[13] = param[9]
-		res[15] = param[10]
-		res[17] = param[11]
-		res[18] = param[12]
-		return res
+        """
+        res = torch.zeros(19, *param.shape[1:]).to(param.device)
+        res[0] = param[0]
+        res[1] = param[1]
+        res[2] = param[2]
+        res[6] = param[3]
+        res[7] = param[4]
+        res[8] = param[5]
+        res[10] = param[6]
+        res[11] = param[7]
+        res[12] = param[8]
+        res[13] = param[9]
+        res[15] = param[10]
+        res[17] = param[11]
+        res[18] = param[12]
+        return res
 
 class BottleneckMaxSquare(nn.Module):
-	expansion = 4
+    expansion = 4
 
-	def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None, bn_momentum=0.1):
-		super().__init__()
-		self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, stride=stride, bias=False)  # change
-		self.bn1 = nn.BatchNorm2d(planes, affine=affine_par)
+    def __init__(self, inplanes, planes, stride=1, dilation=1, downsample=None, bn_momentum=0.1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, stride=stride, bias=False)  # change
+        self.bn1 = nn.BatchNorm2d(planes, affine=affine_par)
 
-		padding = dilation
-		self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1,  # change
-							   padding=padding, bias=False, dilation=dilation)
-		self.bn2 = nn.BatchNorm2d(planes, affine=affine_par)
+        padding = dilation
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1,  # change
+                               padding=padding, bias=False, dilation=dilation)
+        self.bn2 = nn.BatchNorm2d(planes, affine=affine_par)
 
-		self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
-		self.bn3 = nn.BatchNorm2d(planes * 4, affine=affine_par)
+        self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * 4, affine=affine_par)
 
-		self.relu = nn.ReLU(inplace=True)
-		self.downsample = downsample
-		self.stride = stride
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
 
-	def forward(self, x):
-		residual = x
+    def forward(self, x):
+        residual = x
 
-		out = self.conv1(x)
-		out = self.bn1(out)
-		out = self.relu(out)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-		out = self.conv2(out)
-		out = self.bn2(out)
-		out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
 
-		out = self.conv3(out)
-		out = self.bn3(out)
+        out = self.conv3(out)
+        out = self.bn3(out)
 
-		if self.downsample is not None:
-			residual = self.downsample(x)
+        if self.downsample is not None:
+            residual = self.downsample(x)
 
-		out += residual
-		out = self.relu(out)
+        out += residual
+        out = self.relu(out)
 
-		return out
+        return out
 
 class Classifier_ModuleMaxSquare(nn.Module):
-	def __init__(self, inplanes, dilation_series, padding_series, num_classes):
-		super().__init__()
-		self.conv2d_list = nn.ModuleList()
-		for dilation, padding in zip(dilation_series, padding_series):
-			self.conv2d_list.append(
-				nn.Conv2d(inplanes, num_classes, kernel_size=3, stride=1, padding=padding, dilation=dilation, bias=True))
+    def __init__(self, inplanes, dilation_series, padding_series, num_classes):
+        super().__init__()
+        self.conv2d_list = nn.ModuleList()
+        for dilation, padding in zip(dilation_series, padding_series):
+            self.conv2d_list.append(
+                nn.Conv2d(inplanes, num_classes, kernel_size=3, stride=1, padding=padding, dilation=dilation, bias=True))
 
-		for m in self.conv2d_list:
-			m.weight.data.normal_(0, 0.01)
+        for m in self.conv2d_list:
+            m.weight.data.normal_(0, 0.01)
 
-	def forward(self, x):
-		out = self.conv2d_list[0](x)
-		for i in range(len(self.conv2d_list) - 1):
-			out += self.conv2d_list[i + 1](x)
-			return out
+    def forward(self, x):
+        out = self.conv2d_list[0](x)
+        for i in range(len(self.conv2d_list) - 1):
+            out += self.conv2d_list[i + 1](x)
+            return out
 
 class ResNetMultiMaxSquare(nn.Module):
-	def __init__(self, block, layers, num_classes):
-		self.inplanes = 64
-		super().__init__()
-		self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
-							   bias=False)
-		self.bn1 = nn.BatchNorm2d(64, affine=affine_par)
-		for i in self.bn1.parameters():
-			i.requires_grad = False
-		self.relu = nn.ReLU(inplace=True)
-		self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=True)  # change
-		self.layer1 = self._make_layer(block, 64, layers[0])
-		self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-		self.layer3 = self._make_layer(block, 256, layers[2], stride=1, dilation=2)
-		self.layer4 = self._make_layer(block, 512, layers[3], stride=1, dilation=4)
-		self.layer5 = self._make_pred_layer(Classifier_ModuleMaxSquare, 1024, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
-		self.layer6 = self._make_pred_layer(Classifier_ModuleMaxSquare, 2048, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
+    def __init__(self, block, layers, num_classes):
+        self.inplanes = 64
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(64, affine=affine_par)
+        for i in self.bn1.parameters():
+            i.requires_grad = False
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=True)  # change
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=1, dilation=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=1, dilation=4)
+        self.layer5 = self._make_pred_layer(Classifier_ModuleMaxSquare, 1024, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
+        self.layer6 = self._make_pred_layer(Classifier_ModuleMaxSquare, 2048, [6, 12, 18, 24], [6, 12, 18, 24], num_classes)
 
-		for m in self.modules():
-			if isinstance(m, nn.Conv2d):
-				n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-				m.weight.data.normal_(0, 0.01)
-			elif isinstance(m, nn.BatchNorm2d):
-				m.weight.data.fill_(1)
-				m.bias.data.zero_()
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, 0.01)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
-	def _make_layer(self, block, planes, blocks, stride=1, dilation=1):
-		downsample = None
-		if stride != 1 or self.inplanes != planes * block.expansion or dilation == 2 or dilation == 4:
-			downsample = nn.Sequential(
-				nn.Conv2d(self.inplanes, planes * block.expansion,
-						  kernel_size=1, stride=stride, bias=False),
-				nn.BatchNorm2d(planes * block.expansion, affine=affine_par))
-		layers = []
-		layers.append(block(self.inplanes, planes, stride, dilation=dilation, downsample=downsample))
-		self.inplanes = planes * block.expansion
-		for i in range(1, blocks):
-			layers.append(block(self.inplanes, planes, dilation=dilation))
+    def _make_layer(self, block, planes, blocks, stride=1, dilation=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion or dilation == 2 or dilation == 4:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion, affine=affine_par))
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, dilation=dilation, downsample=downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes, dilation=dilation))
 
-		return nn.Sequential(*layers)
+        return nn.Sequential(*layers)
 
-	def _make_pred_layer(self, block, inplanes, dilation_series, padding_series, num_classes):
-		return block(inplanes, dilation_series, padding_series, num_classes)
+    def _make_pred_layer(self, block, inplanes, dilation_series, padding_series, num_classes):
+        return block(inplanes, dilation_series, padding_series, num_classes)
 
-	def forward(self, x):
-		input_size = x.size()[2:]
-		x = self.conv1(x)
-		x = self.bn1(x)
-		x = self.relu(x)
-		x = self.maxpool(x)
-		x = self.layer1(x)
-		x = self.layer2(x)
+    def forward(self, x):
+        input_size = x.size()[2:]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
 
-		x = self.layer3(x)
-		x1 = self.layer5(x)
-		x1 = F.interpolate(x1, size=input_size, mode='bilinear', align_corners=True)
+        x = self.layer3(x)
+        x1 = self.layer5(x)
+        x1 = F.interpolate(x1, size=input_size, mode='bilinear', align_corners=True)
 
-		x2 = self.layer4(x)
-		x2 = self.layer6(x2)
-		x2 = F.interpolate(x2, size=input_size, mode='bilinear', align_corners=True)
+        x2 = self.layer4(x)
+        x2 = self.layer6(x2)
+        x2 = F.interpolate(x2, size=input_size, mode='bilinear', align_corners=True)
 
-		return x2, x1 # changed!
+        return x2, x1 # changed!
 
-	def get_1x_lr_params_NOscale(self):
-		"""
-		This generator returns all the parameters of the net except for
-		the last classification layer. Note that for each batchnorm layer,
-		requires_grad is set to False in deeplab_resnet.py, therefore this function does not return
-		any batchnorm parameter
-		"""
-		b = []
+    def get_1x_lr_params_NOscale(self):
+        """
+        This generator returns all the parameters of the net except for
+        the last classification layer. Note that for each batchnorm layer,
+        requires_grad is set to False in deeplab_resnet.py, therefore this function does not return
+        any batchnorm parameter
+        """
+        b = []
 
-		b.append(self.conv1)
-		b.append(self.bn1)
-		b.append(self.layer1)
-		b.append(self.layer2)
-		b.append(self.layer3)
-		b.append(self.layer4)
+        b.append(self.conv1)
+        b.append(self.bn1)
+        b.append(self.layer1)
+        b.append(self.layer2)
+        b.append(self.layer3)
+        b.append(self.layer4)
 
-		for i in range(len(b)):
-			for j in b[i].modules():
-				jj = 0
-				for k in j.parameters():
-					jj += 1
-					if k.requires_grad:
-						yield k
+        for i in range(len(b)):
+            for j in b[i].modules():
+                jj = 0
+                for k in j.parameters():
+                    jj += 1
+                    if k.requires_grad:
+                        yield k
 
-	def get_10x_lr_params(self):
-		"""
-		This generator returns all the parameters for the last layer of the net,
-		which does the classification of pixel into classes
-		"""
-		b = []
-		b.append(self.layer5.parameters())
-		b.append(self.layer6.parameters())
+    def get_10x_lr_params(self):
+        """
+        This generator returns all the parameters for the last layer of the net,
+        which does the classification of pixel into classes
+        """
+        b = []
+        b.append(self.layer5.parameters())
+        b.append(self.layer6.parameters())
 
-		for j in range(len(b)):
-			for i in b[j]:
-				yield i
+        for j in range(len(b)):
+            for i in b[j]:
+                yield i
 
-	def optim_parameters(self, args):
-		return [{'params': self.get_1x_lr_params_NOscale(), 'lr': args.lr},
-				{'params': self.get_10x_lr_params(), 'lr': 10 * args.lr}]
+    def optim_parameters(self, args):
+        return [{'params': self.get_1x_lr_params_NOscale(), 'lr': args.lr},
+                {'params': self.get_10x_lr_params(), 'lr': 10 * args.lr}]
 
 class DeepLabv2MaxSquare(ResNetMultiMaxSquare):
-	def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
-		super().__init__(BottleneckMaxSquare, [3, 4, 23, 3], num_classes)
-		
-		if restore_from is not None:
-			self.restore_from = restore_from
-			self.restore()
+    def __init__(self, num_classes=19, multi_level=True, output_size=(321, 321), restore_from=None):
+        super().__init__(BottleneckMaxSquare, [3, 4, 23, 3], num_classes)
+        
+        if restore_from is not None:
+            self.restore_from = restore_from
+            self.restore()
 
-	def restore(self):
-		# if hasattr(self, 'restore_from'):
-		# 	not_load_head = False
-		# 	restore_from = self.restore_from
-		# 	saved_state_dict = torch.load(restore_from)
-		# 	if 'state_dict' in saved_state_dict.keys():
-		# 		saved_state_dict = saved_state_dict['state_dict']
-		# 	if "layer" in tuple(saved_state_dict.keys())[-1].split(".")[1]: 
-		# 		start = 1
-		# 	elif "layer" in tuple(saved_state_dict.keys())[-1].split(".")[0]:
-		# 		start = 0
-		# 	else:
-		# 		raise ValueError("Can not find layer start.")
-		# 	new_params = self.state_dict().copy()
-		# 	for i in saved_state_dict: # e.g. self.net.layer3.8.bn1.running_mean -> layer3.8.bn1.running_mean
-		# 		i_parts = i.split('.')
-		# 		if not i_parts[start] == 'layer5' or not not_load_head:
-		# 			new_params['.'.join(i_parts[start:])] = saved_state_dict[i]
-		# 	self.load_state_dict(new_params)
-		
-		if hasattr(self, 'restore_from'):
-			checkpoint = torch.load(self.restore_from)
-			if 'state_dict' in checkpoint:
-				self.load_state_dict(checkpoint['state_dict'])
-			else:
-				self.load_state_dict(checkpoint)
+    def restore(self):
+        # if hasattr(self, 'restore_from'):
+        # 	not_load_head = False
+        # 	restore_from = self.restore_from
+        # 	saved_state_dict = torch.load(restore_from)
+        # 	if 'state_dict' in saved_state_dict.keys():
+        # 		saved_state_dict = saved_state_dict['state_dict']
+        # 	if "layer" in tuple(saved_state_dict.keys())[-1].split(".")[1]: 
+        # 		start = 1
+        # 	elif "layer" in tuple(saved_state_dict.keys())[-1].split(".")[0]:
+        # 		start = 0
+        # 	else:
+        # 		raise ValueError("Can not find layer start.")
+        # 	new_params = self.state_dict().copy()
+        # 	for i in saved_state_dict: # e.g. self.net.layer3.8.bn1.running_mean -> layer3.8.bn1.running_mean
+        # 		i_parts = i.split('.')
+        # 		if not i_parts[start] == 'layer5' or not not_load_head:
+        # 			new_params['.'.join(i_parts[start:])] = saved_state_dict[i]
+        # 	self.load_state_dict(new_params)
+        
+        if hasattr(self, 'restore_from'):
+            checkpoint = torch.load(self.restore_from)
+            if 'state_dict' in checkpoint:
+                self.load_state_dict(checkpoint['state_dict'])
+            else:
+                self.load_state_dict(checkpoint)
 
 """Basic Segmentation"""
 class SegmentationBasicModule(LightningModule):
-	""" Basic module for segmentation tasks.
-	Simply use cross entropy loss as default.
-	"""
+    """ Basic module for segmentation tasks.
+    Simply use cross entropy loss as default.
+    """
 
-	def __init__(
-		self,
-		net: torch.nn.Module,
-		optimizer: torch.optim.Optimizer,
-		dataset_info: dict,
-	):
-		super().__init__()
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        dataset_info: dict,
+    ):
+        super().__init__()
 
-		# this line allows to access init params with 'self.hparams' attribute
-		# also ensures init params will be stored in ckpt
-		self.save_hyperparameters(logger=False, ignore=["net"])
+        # this line allows to access init params with 'self.hparams' attribute
+        # also ensures init params will be stored in ckpt
+        self.save_hyperparameters(logger=False, ignore=["net"])
 
-		self.net = net(
-			num_classes=self.hparams.dataset_info["num_classes"],
-			output_size=self.hparams.dataset_info["image_size"],
-		)
+        self.net = net(
+            num_classes=self.hparams.dataset_info["num_classes"],
+            output_size=self.hparams.dataset_info["image_size"],
+        )
 
-		# use separate metric instance for train, val and test step
-		# to ensure a proper reduction over the epoch
-		self.train_acc = SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255)
-		self.val_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["val_list"]])
-		self.test_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["test_list"]])
+        # use separate metric instance for train, val and test step
+        # to ensure a proper reduction over the epoch
+        self.train_acc = SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255)
+        self.val_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["val_list"]])
+        self.test_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["test_list"]])
 
-		# for logging best so far validation accuracy
-		self.val_acc_best = nn.ModuleList([MaxMetric()for _ in self.hparams.dataset_info["val_list"]])
-		self.val_acc_best_mean = MaxMetric()
+        # for logging best so far validation accuracy
+        self.val_acc_best = nn.ModuleList([MaxMetric()for _ in self.hparams.dataset_info["val_list"]])
+        self.val_acc_best_mean = MaxMetric()
 
-	def forward(self, x: torch.Tensor):
-		outputs = self.net(x)
-		if isinstance(outputs, tuple):
-			outputs = outputs[-1]
-		return outputs
+    def forward(self, x: torch.Tensor):
+        outputs = self.net(x)
+        if isinstance(outputs, tuple):
+            outputs = outputs[-1]
+        return outputs
 
-	def on_train_start(self):
-		# by default lightning executes validation step sanity checks before training starts,
-		# so we need to make sure val_acc_best doesn't store accuracy from these checks
-		self.val_acc_best_mean.reset()
-		for val_acc_best in self.val_acc_best: val_acc_best.reset()
+    def on_train_start(self):
+        # by default lightning executes validation step sanity checks before training starts,
+        # so we need to make sure val_acc_best doesn't store accuracy from these checks
+        self.val_acc_best_mean.reset()
+        for val_acc_best in self.val_acc_best: val_acc_best.reset()
 
-	def step(self, batch: Any):
-		x, y, shape_, name_ = batch
-		outputs = self.forward(x)
-		target_size = y.shape[-2:]
-		outputs = nn.Upsample(size=target_size, mode='bilinear')(outputs)
-		loss, info = self.criterion(outputs, y)
-		return loss, outputs, y, info
+    def step(self, batch: Any):
+        x, y, shape_, name_ = batch
+        outputs = self.forward(x)
+        target_size = y.shape[-2:]
+        outputs = nn.Upsample(size=target_size, mode='bilinear')(outputs)
+        loss, info = self.criterion(outputs, y)
+        return loss, outputs, y, info
 
-	# dataloader_idx = 0 
-	def training_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
-		x, y, shape_, name_ = batch
-		loss, preds, targets, info = self.step(batch)
-		# log train metrics
-		acc = self.train_acc[dataloader_idx](preds, targets)
-		self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-		self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
-	
-		return {"loss": loss}
+    # dataloader_idx = 0 
+    def training_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
+        x, y, shape_, name_ = batch
+        loss, preds, targets, info = self.step(batch)
+        # log train metrics
+        acc = self.train_acc[dataloader_idx](preds, targets)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
+    
+        return {"loss": loss}
 
-	def training_epoch_end(self, outputs: List[Any]):
-		# `outputs` is a list of dicts returned from `training_step()`
-		self.train_acc.reset()
+    def training_epoch_end(self, outputs: List[Any]):
+        # `outputs` is a list of dicts returned from `training_step()`
+        self.train_acc.reset()
 
-	def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
-		x, y, shape_, name_ = batch
-		loss, preds, targets, info = self.step(batch)
-		# log val metrics
-		acc = self.val_acc[dataloader_idx](preds, targets)
-		self.log(f"val/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
-		self.log(f"val/acc", acc, on_step=True, on_epoch=False, prog_bar=True, add_dataloader_idx=True)
-		# log images
-		# if batch_idx == 0:
-		# 	with torch.no_grad():
-		# 		elogger = SegmentationLogger(self, x, targets, preds, loss, acc, self.hparams.dataset_info)
-		# 		for lg in self.loggers: 
-		# 			if "wandb" in lg.__module__:
-		# 				wandb = lg
-		# 				wandb.log_image(key=f"val/all_wrap_{str(dataloader_idx)}", images=[elogger.all_wrap()])
-		return {"loss": loss}
+    def validation_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
+        x, y, shape_, name_ = batch
+        loss, preds, targets, info = self.step(batch)
+        # log val metrics
+        acc = self.val_acc[dataloader_idx](preds, targets)
+        self.log(f"val/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
+        self.log(f"val/acc", acc, on_step=True, on_epoch=False, prog_bar=True, add_dataloader_idx=True)
+        # log images
+        # if batch_idx == 0:
+        # 	with torch.no_grad():
+        # 		elogger = SegmentationLogger(self, x, targets, preds, loss, acc, self.hparams.dataset_info)
+        # 		for lg in self.loggers: 
+        # 			if "wandb" in lg.__module__:
+        # 				wandb = lg
+        # 				wandb.log_image(key=f"val/all_wrap_{str(dataloader_idx)}", images=[elogger.all_wrap()])
+        return {"loss": loss}
 
-	def validation_epoch_end(self, outputs: List[Any]):
-		"""
-		here, we only hand `mean` and `best`, others are handled in validation_step
-		1. (None) epoch acc is already handled by validation_step
-		2. calculate `best for now acc` for each in val_list
-		3. calculate `mean acc epoch` for each in val_list 
-		4. calculate `best for now mean acc epoch` for each in val_list
-		"""
-		val_accs = [val_acc.compute() for val_acc in self.val_acc]
-		# best (seperately)
-		for i in range(len(val_accs)): # log accs of each dataset in val list
-			self.val_acc_best[i].update(val_accs[i])
-			self.log(f"val/acc/dataloaderr_idx_{str(i)}", val_accs[i], on_epoch=True, prog_bar=True)
-			self.log(f"val/acc/dataloaderr_idx_{str(i)}_best", self.val_acc_best[i].compute(), on_epoch=True, prog_bar=True)
-		
-		# mean and best (mean)
-		acc_mean = sum(val_accs) / len(val_accs)
-		self.log("val/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True) # log mean
-		self.val_acc_best_mean.update(acc_mean)
-		self.log("val/acc/mean_best", self.val_acc_best_mean.compute(), on_epoch=True, prog_bar=True) # log best mean
-		
-		# for model checkpoint (use last one)
-		self.log("val/acc", val_accs[-1], on_step=False, on_epoch=True, prog_bar=False) 
-		
-		# reset
-		for i, val_acc in enumerate(self.val_acc):
-			val_acc.reset()
+    def validation_epoch_end(self, outputs: List[Any]):
+        """
+        here, we only hand `mean` and `best`, others are handled in validation_step
+        1. (None) epoch acc is already handled by validation_step
+        2. calculate `best for now acc` for each in val_list
+        3. calculate `mean acc epoch` for each in val_list 
+        4. calculate `best for now mean acc epoch` for each in val_list
+        """
+        val_accs = [val_acc.compute() for val_acc in self.val_acc]
+        # best (seperately)
+        for i in range(len(val_accs)): # log accs of each dataset in val list
+            self.val_acc_best[i].update(val_accs[i])
+            self.log(f"val/acc/dataloaderr_idx_{str(i)}", val_accs[i], on_epoch=True, prog_bar=True)
+            self.log(f"val/acc/dataloaderr_idx_{str(i)}_best", self.val_acc_best[i].compute(), on_epoch=True, prog_bar=True)
+        
+        # mean and best (mean)
+        acc_mean = sum(val_accs) / len(val_accs)
+        self.log("val/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True) # log mean
+        self.val_acc_best_mean.update(acc_mean)
+        self.log("val/acc/mean_best", self.val_acc_best_mean.compute(), on_epoch=True, prog_bar=True) # log best mean
+        
+        # for model checkpoint (use last one)
+        self.log("val/acc", val_accs[-1], on_step=False, on_epoch=True, prog_bar=False) 
+        
+        # reset
+        for i, val_acc in enumerate(self.val_acc):
+            val_acc.reset()
 
-	def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
-		loss, preds, targets, info = self.step(batch)
-		loss, preds, targets = loss.detach(), preds.detach(), targets.detach()
-		# log test metrics
-		acc = self.test_acc[dataloader_idx](preds, targets)
-		# self.log(f"test/loss", loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
-		# self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
-		return {"loss": loss}
+    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
+        loss, preds, targets, info = self.step(batch)
+        loss, preds, targets = loss.detach(), preds.detach(), targets.detach()
+        # log test metrics
+        acc = self.test_acc[dataloader_idx](preds, targets)
+        # self.log(f"test/loss", loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
+        # self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
+        return {"loss": loss}
 
-	def test_epoch_end(self, outputs: List[Any]):
-		test_accs = [test_acc.compute() for test_acc in self.test_acc]
-		for i in range(len(test_accs)): # log accs of each dataset in val list
-			self.log(f"test/acc/dataloaderr_idx_{str(i)}", test_accs[i], on_epoch=True, prog_bar=True)
-		acc_mean = sum(test_accs) / len(test_accs)
-		self.log("test/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True)
-		for i, test_acc in enumerate(self.test_acc):
-			test_acc.reset()
+    def test_epoch_end(self, outputs: List[Any]):
+        test_accs = [test_acc.compute() for test_acc in self.test_acc]
+        for i in range(len(test_accs)): # log accs of each dataset in val list
+            self.log(f"test/acc/dataloaderr_idx_{str(i)}", test_accs[i], on_epoch=True, prog_bar=True)
+        acc_mean = sum(test_accs) / len(test_accs)
+        self.log("test/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True)
+        for i, test_acc in enumerate(self.test_acc):
+            test_acc.reset()
 
-	def configure_optimizers(self):
-		"""Choose what optimizers and learning-rate schedulers to use in your optimization.
-		Normally you'd need one. But in the case of GANs or similar you might have multiple.
+    def configure_optimizers(self):
+        """Choose what optimizers and learning-rate schedulers to use in your optimization.
+        Normally you'd need one. But in the case of GANs or similar you might have multiple.
 
-		Examples:
-			https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
-		"""
-		op = self.hparams.optimizer
-		return {
-			"optimizer": op(
-				# params=self.parameters()
-				params=self.net.optim_parameters(op.keywords["lr"]), 
-			),
-		}
+        Examples:
+            https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
+        """
+        op = self.hparams.optimizer
+        return {
+            "optimizer": op(
+                # params=self.parameters()
+                params=self.net.optim_parameters(op.keywords["lr"]), 
+            ),
+        }
 
-	def criterion(self, outputs, targets):
-		loss = cross_entropy_2d(outputs, targets)
-		return loss.mean(), {}
+    def criterion(self, outputs, targets):
+        loss = cross_entropy_2d(outputs, targets)
+        return loss.mean(), {}
 
 class SegmentationSingleLevelModule(SegmentationBasicModule):
-	pass
+    pass
 
 class SegmentationMultiLevelModule(SegmentationBasicModule):
-	def __init__(
-		self,
-		net: torch.nn.Module,
-		optimizer: torch.optim.Optimizer,
-		dataset_info: dict,
-		lambda_aux: float = 0.4,
-	):
-		super().__init__(net, optimizer, dataset_info)
-	
-	def forward(self, x):
-		return self.net(x)
-	
-	def step(self, batch):
-		x, y, shape_, name_ = batch
-		preds, preds_aux = self.net(x)
-		preds = nn.Upsample(size=y.shape[-2:], mode='bilinear')(preds)
-		preds_aux = nn.Upsample(size=y.shape[-2:], mode='bilinear')(preds_aux)
-		loss_main, info = self.criterion(preds, y)
-		loss_aux, info = self.criterion(preds_aux, y)
-		loss = loss_main + self.hparams.lambda_aux * loss_aux
-		return loss, preds, y, info
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        dataset_info: dict,
+        lambda_aux: float = 0.4,
+    ):
+        super().__init__(net, optimizer, dataset_info)
+    
+    def forward(self, x):
+        return self.net(x)
+    
+    def step(self, batch):
+        x, y, shape_, name_ = batch
+        preds, preds_aux = self.net(x)
+        preds = nn.Upsample(size=y.shape[-2:], mode='bilinear')(preds)
+        preds_aux = nn.Upsample(size=y.shape[-2:], mode='bilinear')(preds_aux)
+        loss_main, info = self.criterion(preds, y)
+        loss_aux, info = self.criterion(preds_aux, y)
+        loss = loss_main + self.hparams.lambda_aux * loss_aux
+        return loss, preds, y, info
 
-	def configure_optimizers(self):
-		"""Choose what optimizers and learning-rate schedulers to use in your optimization.
-		Normally you'd need one. But in the case of GANs or similar you might have multiple.
+    def configure_optimizers(self):
+        """Choose what optimizers and learning-rate schedulers to use in your optimization.
+        Normally you'd need one. But in the case of GANs or similar you might have multiple.
 
-		Examples:
-			https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
-		"""
-		op = self.hparams.optimizer
-		op = op(
-				# params=self.parameters()
-				params=self.net.optim_parameters(op.keywords["lr"]), 
-			)
-		return {
-			"optimizer": op,
-			# poly lr scheduler. # new_lr = init_lr * (1 - float(iter) / max_iter) ** power. power = 0.9
-			"lr_scheduler": {
-				"scheduler": torch.optim.lr_scheduler.LambdaLR(
-					op, 
-					lambda step: (1 - step / 200000) ** 0.9 # from MaxSquareLoss paper
-				),
-				"interval": "step",
-				"frequency": 1,
-			}
-		}
+        Examples:
+            https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
+        """
+        op = self.hparams.optimizer
+        op = op(
+                # params=self.parameters()
+                params=self.net.optim_parameters(op.keywords["lr"]), 
+            )
+        return {
+            "optimizer": op,
+            # poly lr scheduler. # new_lr = init_lr * (1 - float(iter) / max_iter) ** power. power = 0.9
+            "lr_scheduler": {
+                "scheduler": torch.optim.lr_scheduler.LambdaLR(
+                    op, 
+                    lambda step: (1 - step / 200000) ** 0.9 # from MaxSquareLoss paper
+                ),
+                "interval": "step",
+                "frequency": 1,
+            }
+        }
 
 
 """DIGA"""
 class DIGA(LightningModule):
-	def __init__(
-		self,
-		net: torch.nn.Module,
-		dataset_info: dict = {},
-		cfg: object = None,
-		optimizer: torch.optim.Optimizer = None,
-	):
-		super().__init__()
-		self.save_hyperparameters(logger=False, ignore=["net"])
-		self.net = net(
-			num_classes=self.hparams.dataset_info["num_classes"],
-			output_size=self.hparams.dataset_info["image_size"],
-		)
-		# use separate metric instance for train, val and test step
-		# to ensure a proper reduction over the epoch
-		self.train_acc = SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255)
-		self.test_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["test_list"]])
-		
-		self.test_step_global = 0
-		
-		# Initialize confidence threshold
-		self.confident_pixels_per_image = []
-		self.total_pixels_per_image = []
-		self.image_indices = []
-		
-		# Load class medians from JSON
-		self.class_medians = self._load_class_medians()
-		
-		# Replace BN layers and configure them
-		self._replace_bn()
-		self._configure_bn_running_stats()
+    def __init__(
+        self,
+        net: torch.nn.Module,
+        dataset_info: dict = {},
+        cfg: object = None,
+        optimizer: torch.optim.Optimizer = None,
+    ):
+        super().__init__()
+      
+        self.save_hyperparameters(logger=False, ignore=["net"])
+        self.net = net(
+            num_classes=self.hparams.dataset_info["num_classes"],
+            output_size=self.hparams.dataset_info["image_size"],
+        )
+        # use separate metric instance for train, val and test step
+        # to ensure a proper reduction over the epoch
+        self.train_acc = SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255)
+        self.test_acc = nn.ModuleList([SegmentationMetric(num_classes=self.hparams.dataset_info["num_classes"], ignore_index=255) for _ in self.hparams.dataset_info["test_list"]])
+        
+        self.test_step_global = 0
+        
+        # Initialize confidence threshold
+        self.confident_pixels_per_image = []
+        self.total_pixels_per_image = []
+        self.image_indices = []
+        
+        # Load class medians from JSON
+        self.class_medians = self._load_class_medians()
+        
+        # Replace BN layers and configure them
+        self._replace_bn()
+        self._configure_bn_running_stats()
 
-		# Loss init
-		self.edge_loss = nn.BCEWithLogitsLoss()
-		
-		self.class_calculation_count = torch.zeros(self.hparams.dataset_info["num_classes"], device=self.device)
-		# Initialize thresholds array
-		self.calculation_thresholds = torch.tensor([10, 100, 1000, 2500, 10000], device=self.device)
-		# Initialize prototype parameters if they exist
-		if hasattr(self, 'classifier_running_proto'):
-			self.classifier_running_proto.requires_grad = True
-			
-		self.saved_images_count = 0
+        # Loss init
+        self.loss = nn.CrossEntropyLoss(ignore_index=255)
+        self.edge_loss = nn.BCEWithLogitsLoss()
+        
+        num_classes = self.hparams.dataset_info["num_classes"]
+        self.class_calculation_count = torch.zeros(self.hparams.dataset_info["num_classes"], device=self.device)
+        # Initialize thresholds array
+        self.calculation_thresholds = torch.tensor([10, 100, 1000, 2500, 10000], device=self.device)
+        # Initialize prototype parameters if they exist
+        if hasattr(self, 'classifier_running_proto'):
+            self.classifier_running_proto.requires_grad = True
+            
+        self.saved_images_count = 0
+        self.saved_edges_count = 0
+        
+        # bla bla bla
+        self.kernel_size = 100
+        self.selected_class = [4, 5, 6, 7, 9, 12, 14, 15, 17, 18]
+        self.register_buffer('best_region_prob', torch.zeros(num_classes, device='cpu'))
+        self.register_buffer('best_region_image', torch.zeros(num_classes, 3, self.kernel_size, self.kernel_size, device='cpu'))
+        
+        self.aug = AugCO(model=self.net, num_classes=num_classes)
+        self.register_buffer('running_q', torch.zeros(num_classes))
+        self.q_momentum = 0.9
+        self.lie_alpha = 0.1
+        self.eta = 0.5
+    
+    def _save_edge_comparison(self, edge_canny, low_feature, name):
+        """Save comparison of edge detection and low-level features.
+        
+    Args:
+            edge_canny (torch.Tensor): Canny edge detection output
+            low_feature (torch.Tensor): Low-level features from the network
+            name (str): Name to use for saving the image
+        """
+        # Process one image at a time and move to CPU first
+        edge_canny_cpu = edge_canny[0].detach().cpu()
+        low_feature_cpu = low_feature[0].detach().cpu()
+        
+        # Convert to numpy after moving to CPU and squeeze extra dimensions
+        edge_canny_np = edge_canny_cpu.squeeze().numpy()
+        low_feature_np = low_feature_cpu.mean(dim=0).squeeze().numpy()
+        
+        # Create figure with two subplots
+        plt.figure(figsize=(12, 6))
+        
+        # Plot edge_canny
+        plt.subplot(1, 2, 1)
+        plt.imshow(edge_canny_np, cmap='gray')
+        plt.title('Canny Edge')
+        plt.axis('off')
+        
+        # Plot low_feature
+        plt.subplot(1, 2, 2)
+        plt.imshow(low_feature_np, cmap='gray')
+        plt.title('Low Feature')
+        plt.axis('off')
+        
+        # Handle the name parameter which could be a tuple
+        if isinstance(name, tuple):
+            # Extract the filename from the tuple and remove any path components
+            filename = os.path.basename(name[0])
+            # Remove the file extension
+            filename = os.path.splitext(filename)[0]
+        else:
+            filename = str(name)
+        
+        # Create the output directory if it doesn't exist
+        os.makedirs('/root/duc-loi/code/DIGA/output/edges', exist_ok=True)
+        
+        # Save the figure
+        save_path = f'/root/duc-loi/code/DIGA/output/edges/edge_comparison_{filename}.png'
+        plt.savefig(save_path)
+        plt.close()
 
-	def _save_predictions(self, preds, targets, x, feature, name_, shape_, batch_idx, dataloader_idx, acc):
-		"""Save predictions and related data for all images in a batch.
-		
-		Args:
-			preds: Model predictions [B, C, H, W]
-			targets: Ground truth labels [B, H, W]
-			x: Input images [B, C, H, W]
-			feature: Feature maps [B, C, H, W]
-			name_: List of image names
-			shape_: List of original image shapes
-			batch_idx: Current batch index
-			dataloader_idx: Current dataloader index
-			acc: Accuracy score
-		"""
-		os.makedirs('output/predictions', exist_ok=True)
-		
-		# Cityscapes color mapping (RGB values for each class)
-		cityscapes_colors = {
-			0: [128, 64, 128],   # road
-			1: [244, 35, 232],   # sidewalk
-			2: [70, 70, 70],     # building
-			3: [102, 102, 156],  # wall
-			4: [190, 153, 153],  # fence
-			5: [153, 153, 153],  # pole
-			6: [250, 170, 30],   # traffic light
-			7: [220, 220, 0],    # traffic sign
-			8: [107, 142, 35],   # vegetation
-			9: [152, 251, 152],  # terrain
-			10: [70, 130, 180],  # sky
-			11: [220, 20, 60],   # person
-			12: [255, 0, 0],     # rider
-			13: [0, 0, 142],     # car
-			14: [0, 0, 70],      # truck
-			15: [0, 60, 100],    # bus
-			16: [0, 80, 100],    # train
-			17: [0, 0, 230],     # motorcycle
-			18: [119, 11, 32],   # bicycle
-			255: [0, 0, 0]       # ignore
-		}
-		
-		for i, img_name in enumerate(name_):
-			# Get predictions and ground truth
-			pred = preds[i].argmax(dim=0).cpu().numpy()  # [H, W]
-			gt = targets[i].cpu().numpy()  # [H, W]
-			img = x[i].cpu().numpy()  # [C, H, W]
-			
-			# Create RGB visualizations
-			h, w = pred.shape
-			pred_rgb = np.zeros((h, w, 3), dtype=np.uint8)
-			gt_rgb = np.zeros((h, w, 3), dtype=np.uint8)
-			
-			# Map each class to its color
-			for class_id, color in cityscapes_colors.items():
-				pred_rgb[pred == class_id] = color
-				gt_rgb[gt == class_id] = color
-			
-			# Create visualization figure
-			plt.figure(figsize=(15, 5))
-			
-			# Plot input image
-			plt.subplot(131)
-			plt.imshow(np.transpose(img, (1, 2, 0)))
-			plt.title('Input Image')
-			plt.axis('off')
-			
-			# Plot prediction
-			plt.subplot(132)
-			plt.imshow(pred_rgb)
-			plt.title('Prediction')
-			plt.axis('off')
-			
-			# Plot ground truth
-			plt.subplot(133)
-			plt.imshow(gt_rgb)
-			plt.title('Ground Truth')
-			plt.axis('off')
-			
-			# Save visualization
-			filename = img_name.replace('/', '_').replace('.', '_')
-			vis_path = f'output/predictions/{filename}_vis.png'
-			plt.savefig(vis_path, bbox_inches='tight', pad_inches=0)
-			plt.close()
-			
-			# Save raw data
-			save_dict = {
-				'predictions': preds[i].cpu(),
-				'ground_truth': targets[i].cpu(),
-				'input_image': x[i].cpu(),
-				'features': feature[i].cpu() if feature is not None else None,
-				'image_name': img_name,
-				'shape': shape_[i].cpu() if shape_ is not None else None,
-				'batch_idx': batch_idx,
-				'dataloader_idx': dataloader_idx,
-				'accuracy': acc.item()
-			}
-			
-			# save_path = f'output/predictions/{filename}_pred.pt'
-			# torch.save(save_dict, save_path)
-			print(f"Saved predictions and visualization for {img_name}")
-			# print(f"- Raw data: {save_path}")
-			print(f"- Visualization: {vis_path}")
+    def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
+        x, y, shape_, name_ = batch
+        loss, preds, targets, info = self.step(batch)
+        loss = torch.tensor(0.0)
 
-	def test_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
-		x, y, shape_, name_ = batch
-		loss, preds, targets, info, feature = self.step(batch)
-		loss = torch.tensor(0.0)
-		
-		acc = self.test_acc[dataloader_idx](preds, targets)
-		
-		self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
-		self.test_step_global += 1
+        acc = self.test_acc[dataloader_idx](preds.to(self.device), targets.to(self.device))
+        
+        self.log(f"test/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
+        self.test_step_global += 1
 
-		if self.saved_images_count < 20:
-			self.saved_images_count += 1
-			self._save_predictions(
-				preds=preds,
-				targets=targets,
-				x=x,
-				feature=feature,
-				name_=name_,
-				shape_=shape_,
-				batch_idx=batch_idx,
-				dataloader_idx=dataloader_idx,
-				acc=acc
-			)
-		
-		return {"loss": loss}
+        if self.saved_images_count < 20:
+            self.saved_images_count += 1
+            
+        return {"loss": loss}
 
-	def collect_params(self, model):
-		params = []
-		names = []
-		# collect only bn
-		for nm, m in model.named_modules():
-			if isinstance(m, SIFABatchNorm2d):
-				for np, p in m.named_parameters():
-					if np in ["weight", "bias", "lambda_"]:
-						params.append(p)
-						names.append(f"{nm}.{np}")
-		return params, names
-	
-	def configure_optimizers(self):
-		"""Configure optimizer with fixed learning rate."""
-		params, names = self.collect_params(self.net)
-		
-		# Create optimizer with parameters from config
-		optimizer = torch.optim.SGD(
-			params=params,
-			lr=float(self.hparams.optimizer.lr),
-			momentum=float(self.hparams.optimizer.momentum),
-			weight_decay=float(self.hparams.optimizer.weight_decay)
-		)
-		
-		return {"optimizer": optimizer}
+    def collect_params(self, model):
+        params = []
+        names = []
+        # collect only bn
+        for nm, m in model.named_modules():
+            if isinstance(m, SIFABatchNorm2d):
+                for np, p in m.named_parameters():
+                    if np in ["weight", "bias", "lambda_"]:
+                        params.append(p)
+                        names.append(f"{nm}.{np}")
+        return params, names
+    
+    def configure_optimizers(self):
+        """Configure optimizer with fixed learning rate."""
+        params, names = self.collect_params(self.net)
 
-	def on_test_start(self):
-		# metric to cpu
-		for metric in self.test_acc:
-			metric.cpu()
+        # Create optimizer with parameters from config
+        optimizer = torch.optim.SGD(
+            params=self.net.parameters(),
+            lr=float(self.hparams.optimizer.lr),
+            momentum=float(self.hparams.optimizer.momentum),
+            weight_decay=float(self.hparams.optimizer.weight_decay)
+        )
+        
+        return {"optimizer": optimizer}
 
-	def forward(self, x: torch.Tensor):
-		outputs = self.net(x)
-		if isinstance(outputs, tuple):
-			outputs = outputs[-1]
-		return outputs
-	
-	def get_pseudolabeling_loss(self, mask_pred_tensor_raw, loss_name='iou'):
-		gt_mask_ce = mask_pred_tensor_raw.detach().argmax(dim=1, keepdim=True)
-		
-		gt_mask_iou = torch.zeros_like(mask_pred_tensor_raw)
-		gt_mask_iou.scatter_(1, gt_mask_ce, 1)
-		
-		if loss_name == 'iou':
-			loss = iou_loss(mask_pred_tensor_raw, gt_mask_iou, apply_softmax=True, reduction='none')
-		elif loss_name == 'ce':
-			loss = torch.nn.functional.cross_entropy(mask_pred_tensor_raw, gt_mask_ce.squeeze(1), reduction='none')
-			loss = loss.mean(dim=(1, 2))        
-		return loss, gt_mask_ce.detach().cpu()
-			
-	def step(self, batch: Any):
-		x, y, shape_, name_ = batch
-		target_size = y.shape[-2:]
-			
-		outputs, info, feature, loss = self.forward_and_adapt((x,y))
-		# loss_seg, pm = self.get_pseudolabelling_loss(preds_seg_it_raw, loss_name=self.hparams.cfg.loss_name)
-		outputs = nn.Upsample(size=target_size, mode='bilinear')(outputs)
-		return loss, outputs.cpu(), y.cpu(), info, feature
+    def on_test_start(self):
+        # metric to cpu
+        for metric in self.test_acc:
+            metric.to(self.device)
 
-	def training_step(self, batch: Any, batch_idx: int):
-		x, y, shape_, name_ = batch
-		
-		loss, preds, targets, info, feature = self.step(batch)
-		
-		preds = preds.to(self.train_acc.device)
-		targets = targets.to(self.train_acc.device)
-		acc = self.train_acc(preds, targets)
-		
-		# log test metrics
-		self.log(f"train/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
-		self.log(f"train/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
-		self.test_step_global += 1
-		
-		return {"loss": loss}
+    def forward(self, x: torch.Tensor):
+        outputs = self.net(x)
+        if isinstance(outputs, tuple):
+            outputs = outputs[-1]
+        return outputs
+            
+    def step(self, batch: Any):
+        x, y, shape_, name_ = batch
+        target_size = y.shape[-2:]
+            
+        outputs, info, loss = self.forward_and_adapt(batch)
+        
+        outputs = nn.Upsample(size=target_size, mode='bilinear')(outputs)
+        return loss, outputs.cpu(), y.cpu(), info
 
-	@staticmethod
-	def canny_edge_tensor(image_tensor, low_threshold=50, high_threshold=150):
-		image_np = image_tensor.cpu().numpy()
-		batch_size = image_np.shape[0]
-		edges_list = []
-		
-		for i in range(batch_size):
-			gray = np.mean(image_np[i], axis=0).astype(np.uint8)
-			edges = cv2.Canny(gray, low_threshold, high_threshold)
-			edges_list.append(edges)
-			
-		edges = np.stack(edges_list)
-		edges = torch.tensor(edges).float() / 255.0
-		return edges.unsqueeze(1)
+    def training_step(self, batch: Any, batch_idx: int):
+        x, y, shape_, name_ = batch
+        print("size of x:", x.shape)
+        
+        loss, preds, targets, info = self.step(batch)
+        
+        preds = preds.to(self.train_acc.device)
+        targets = targets.to(self.train_acc.device)
+        acc = self.train_acc(preds, targets)
+        
+        # log test metrics
+        self.log(f"train/loss", loss, on_step=True, on_epoch=True, prog_bar=False, add_dataloader_idx=True)
+        self.log(f"train/acc", acc, on_step=True, on_epoch=True, prog_bar=True, add_dataloader_idx=True)
+        self.test_step_global += 1
+        
+        return {"loss": loss}
+        
+    def visualize_image(self, image: torch.Tensor, folder_to_save: str, name: str):
+        save_path = os.path.join(folder_to_save, name)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        mean = torch.tensor([128.0, 128.0, 128.0]).view(3, 1, 1).to(image.device)
+        image = image + mean
+        image = image[[2, 1, 0], :, :]
+        image = image.clamp(0, 255).byte()
 
-	def forward_and_adapt(self, pair):
-		"""Forward and adapt model on batch of data."""
-		x, y = pair
-		  
-		feature, outputs, low_feature = self.net(x, feat=True, edge=True)
-		
-		to_logs = {}
-		outputs_proto, to_logs_ = self.multi_proto_label(
-			feature,
-			outputs, 
-			y, 
-			self.hparams.dataset_info.class_names,
-			self.hparams.cfg,
-		)
+        img = image.cpu().permute(1, 2, 0).numpy()
 
-		# outputs = outputs_proto * self.hparams.cfg.fusion_lambda + outputs.softmax(1) * (1 - self.hparams.cfg.
-		# fusion_lambda)
-		outputs_softmax = outputs.softmax(1)
-		fused_outputs = outputs_proto * self.hparams.cfg.fusion_lambda + outputs_softmax * (1 - self.hparams.cfg.fusion_lambda)
-	  
-		if self.training:
-			pseudo_labels = outputs.argmax(1)
-			loss = F.cross_entropy(outputs, pseudo_labels, ignore_index=255)
-			
-			edge_canny = DIGA.canny_edge_tensor(x).to(self.device)
-			low_feature = low_feature.to(self.device)
-			edge_loss = self.edge_loss(low_feature, edge_canny)
-			loss += edge_loss * 0.5
-		else:
-			loss = torch.tensor(0.0, device=self.device)
-			
-		return fused_outputs.cpu(), to_logs, feature, loss
+        plt.figure(figsize=(5, 5))
+        plt.imshow(img)
+        plt.axis('off')
+        plt.title(name)
 
-	def test_epoch_end(self, outputs: List[Any]): 
-		stats = self._calculate_overall_statistics()
-		self._print_statistics(stats)
-		
-		test_accs = [test_acc.compute() for test_acc in self.test_acc]
-		acc_mean = sum(test_accs) / len(test_accs)
-		self.log("test/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True)
-		for i in range(len(test_accs)): # log accs of each dataset in val list
-			self.log(f"test/acc/dataloaderr_idx_{str(i)}", test_accs[i], on_epoch=True, prog_bar=True)
-			self.log(f"test/acc/dataloaderr16_idx_{str(i)}", self.test_acc[i].compute_iou(type="16"), on_epoch=True, prog_bar=True)
-			self.log(f"test/acc/dataloaderr13_idx_{str(i)}", self.test_acc[i].compute_iou(type="13"), on_epoch=True, prog_bar=True)
-			# use wandb logger to log 
-			class_iou = self.test_acc[i].compute_class_iou()
-			class_names = self.hparams.dataset_info.class_names
-			self.wandb.log_table(key=f"test/class_iou/dataloaderr_idx_{str(i)}", columns=list(class_names), data=[class_iou])
-		for i, test_acc in enumerate(self.test_acc): # reset
-			test_acc.reset()
-		
-	def _update_statistics(self, above_threshold: int, total_pixels: int):
-		"""Update statistics for a single image.
-		
-		Args:
-			above_threshold: Number of pixels above confidence threshold
-			total_pixels: Total number of pixels in the image
-		"""
-		self.confident_pixels_per_image.append(above_threshold)
-		self.total_pixels_per_image.append(total_pixels)
-		self.image_indices.append(len(self.image_indices))
-		
-	def _calculate_overall_statistics(self) -> dict:
-		"""Calculate and return overall statistics.
-		
-		Returns:
-			Dictionary containing overall statistics
-		"""
-		total_confident = sum(self.confident_pixels_per_image)
-		total_pixels = sum(self.total_pixels_per_image)
-		avg_percentage = total_confident / total_pixels * 100
-		
-		return {
-			'total_images': len(self.image_indices),
-			'avg_confident_pixels': total_confident/len(self.image_indices),
-			'avg_percentage': avg_percentage
-		}
-		
-	def _print_statistics(self, stats: dict):
-		"""Print statistics in a formatted way.
-		
-		Args:
-			stats: Dictionary containing statistics to print
-		"""
-		print(f"\nOverall Statistics:")
-		print(f"Total number of images: {stats['total_images']}")
-		print(f"Average confident pixels per image: {stats['avg_confident_pixels']:.0f}")
-		print(f"Average percentage of confident pixels: {stats['avg_percentage']:.2f}%")
-		
-	def high_confident_proto_label(self, outputs, threshold, number_of_prototypes):
-		"""High confident pseudo label.
-		For each pixel, output the max prob class if max_prob > bar, else 255
-		
-		Args:
-			outputs: (B, C, H, W), logits
-			bar: float, threshold
-			class_balance: bool, if True, use class balance to select the max prob class
-			ground_truth: (B, H, W), ground truth label
-		Returns:
-			pseudo_label: (B, H, W)
-		"""
-		# Convert logits to probabilities using softmax
-		outputs = outputs.softmax(dim=1)
-		pseudo_label = outputs.argmax(dim=1)
-		
-		# Get max probabilities for each pixel and which class has max probability for each pixel
-		max_probs, max_probs_class = outputs.max(dim=1)
-		
-		# Calculate number of pixels to keep per image
-		total_pixels_per_image = max_probs[0].numel()  # H * W
-		k_pixels = int(total_pixels_per_image * number_of_prototypes)  # Number of pixels to keep
-		
-		# Initialize mask for confident pixels
-		confident_mask = torch.zeros_like(max_probs, dtype=torch.bool)
-		
-		# Process each image in the batch for top-k pixels
-		for i in range(max_probs.shape[0]):
-			# Flatten probabilities for this image
-			flat_probs = max_probs[i].flatten()
-			
-			# Get indices of top k pixels
-			_, top_indices = torch.topk(flat_probs, k_pixels)
-			
-			# Create mask for this image
-			img_mask = torch.zeros_like(flat_probs, dtype=torch.bool)
-			img_mask[top_indices] = True
-			
-			# Reshape mask back to image dimensions
-			confident_mask[i] = img_mask.reshape(max_probs[i].shape)
-			
-			for c in range(self.hparams.dataset_info["num_classes"]):
-				class_mask = (max_probs_class[i] == c)
-				if class_mask.sum() > 0:
-					class_probs = max_probs[i][class_mask]
-					confident_mask[i][class_mask] &= (class_probs > self.class_medians[c])
-					
-					above_median = (class_probs > self.class_medians[c]).sum().item()
-					total_class_pixels = class_mask.sum().item()
-					# print(f"Class {c}: {above_median}/{total_class_pixels} pixels above({self.class_medians[c]:.3f})")
-					
-		# Process confident pixels for smaller than threshold
-		# confident_mask = confident_mask & (max_probs > threshold)
+        plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+        plt.close()
+    
+    def visualize_tensor(self, tensor, folder_to_save, name):
+        save_path = os.path.join(folder_to_save, name)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-		# Update statistics
-		above_threshold = confident_mask.sum().item()
-		total_pixels = confident_mask.numel()
-		self._update_statistics(above_threshold, total_pixels)
-		
-		pseudo_label[~confident_mask] = 255
-		pseudo_unique = pseudo_label.unique()
-		# number of confident pixels / total pixels
-		not_confident_percentage = (total_pixels - above_threshold) / total_pixels * 100
-		print(f"not confident percentage: {not_confident_percentage:.2f}%")
-		return pseudo_label
-	
-	def multi_proto_label(self, feature, outputs, y, class_names, cfg):
-		""" Calculate label for each pixel based on multiple prototypes of each class
-		Args:
-			feature: (B, CH, H, W), feature map
-			outputs: (B, C, H, W), logits
-			y: (B, H, W), ground truth
-			class_names: list of class names
-			cfg: dict, config for multi_proto_label
-				strategy: str. values can be "mean_and_instance", "two_proto_per_class", ...
-				reduce_method: str. values can be "best", "weighted_sum", ...
-				lambda_: float. weight for mean prototypes in "weighted_sum" reduce_method
-				rho: float. weight for instance prototypes when update mean prototypes
-		Returns:
-			prediction: (B, H, W), prediction for each pixel
+        arr = tensor.detach().cpu().numpy()
+        cmap = 'jet'        
+        if arr.ndim == 3:
+            arr = np.argmax(arr, axis=0)
 
-		"""
-		multi_pred, to_logs = None, {}
-		# y = F.interpolate(y.unsqueeze(1).float(), size=outputs.shape[2:], mode="nearest").squeeze(1).long()
-		proto_label = self.high_confident_proto_label(
-			outputs, 
-			threshold=cfg.confidence_threshold, 
-			number_of_prototypes=cfg.number_of_prototypes
-		)
-		proto, exists_flag = self.cal_proto(feature, proto_label)
-		# init or update mean prototypes
-		if not hasattr(self, "classifier_running_proto"):
-			self.classifier_running_proto, self.classifier_running_proto_exists_flag = proto, exists_flag
-		else:
-			self.classifier_running_proto, self.classifier_running_proto_exists_flag = self._update_classifier_proto(feature, proto_label, self.classifier_running_proto, self.classifier_running_proto_exists_flag, cfg.proto_rho)
-		# make prediction
-		instance_pred = self.cal_pred_of_proto(feature, proto, exists_flag)
-		mean_pred = self.cal_pred_of_proto(feature, self.classifier_running_proto, self.classifier_running_proto_exists_flag)
-		multi_pred = cfg.proto_lambda * mean_pred + (1-cfg.proto_lambda) * instance_pred
-		return multi_pred, to_logs
-	
-	def cal_pred_of_proto(self, feature, proto, exists_flag, tau=2.0):
-		""" Calculate the weight for classes of each pixel.
-		For each pixel, we calculate the distance between the prototype of each class and the feature of the pixel.
-		Then, we calculate the weight of each class by softmax with temperature tau.
-		Note that we only calculate the weight of the classes that have prototypes, for other classes, the weight
-		should be 0.
-		Args:
-			feature: [B, CH, H, W]
-			proto: [C, CH]
-			exists_flag: [C]
-			tau: temperature
-		Returns:
-			weight: [B, C, H, W]
-		"""
-		# calculate distance
-		feature = feature.unsqueeze(1) # [B, 1, CH, H, W]
-		proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [1, C, CH, 1, 1]
-		# feature_norm = feature / (feature.norm(dim=2, keepdim=True) + 1e-8)
-		# proto_norm = proto / (proto.norm(dim=2, keepdim=True) + 1e-8)
-		# cos_sim = torch.sum(feature_norm * proto_norm, dim=2)
-		# dist = 1 - cos_sim
-		dist = torch.norm(proto - feature, dim=2) # [B, C, H, W]
-		# calculate weight by softmax
-		weight = torch.exp(-dist / tau) # [B, C, H, W]
-		weight = weight * exists_flag.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [B, C, H, W]
-		weight = weight / torch.sum(weight, dim=1, keepdim=True) # [B, C, H, W]
-		return weight
+        plt.figure()
+        plt.axis('off')
+        plt.imshow(arr, cmap=cmap)
+        plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+        plt.close()
+    
+    def update_running_q(self, probs):
+        batch_q = probs.mean(dim=[0, 2, 3])
+        self.running_q = self.q_momentum * self.running_q + (1 - self.q_momentum) * batch_q
+        
+    def compute_loss_weights(self):
+        q = self.running_q + 1e-8 # avoid / 0
+        q_eta = q.pow(self.eta)
+        q_sum = q_eta.sum()
+        lambda_c = torch.log(q_sum / q_eta)
+        return lambda_c
+    
+    def loss_SST(self, outputs, pseudo_labels, mask):
+        B, C, H, W = outputs.shape
+        
+        # mask confidence
+        mask_int = mask.int()
+        
+        # update running_q
+        probs = outputs.detach().softmax(dim=1)
+        self.update_running_q(probs)
+        
+        # weight per pixel
+        lambda_c = self.compute_loss_weights()
+        weights = lambda_c[pseudo_labels]
+        
+        # compute loss cross-entropy
+        log_probs = F.log_softmax(outputs, dim=1)
+        loss_CE = -log_probs.gather(1, pseudo_labels.unsqueeze(1)).squeeze(1)
+        
+        weighted_loss = loss_CE * mask_int * weights
+        loss = weighted_loss.sum() / mask_int.sum()
+        return loss
+    
+    def loss_IE(self, outputs):
+        B, C, H, W = outputs.shape
+        
+        probs = outputs.detach().softmax(dim=1)
+        probs_flat = probs.permute(0, 2, 3, 1).reshape(-1, C)
+        log_q = torch.log(self.running_q + 1e-8)
+        
+        lie = (probs_flat * log_q).sum(dim=1)
+        loss = -lie.mean()
+        return loss
+    
+    def forward_and_adapt(self, batch):
+        """Forward and adapt model on batch of data."""
+        x, y, shape_, name_ = batch
+        
+        to_logs = {}
+        
+        if self.training:
+            prob_mask, outputs_1, outputs_2 = self.aug(batch)
+            pseudo_labels = outputs_2.argmax(1)
+            loss_SST = self.loss_SST(outputs_2, pseudo_labels, prob_mask)
+            loss_IE = self.loss_IE(outputs_2)
+            loss = loss_SST + self.lie_alpha * loss_IE 
+            
+            feature, outputs = self.net(x, feat=True)
+            fused_outputs = outputs.softmax(1)
+        else:
+            feature, outputs= self.net(x, feat=True)
+            
+            outputs_proto, to_logs_ = self.multi_proto_label(
+                feature,
+                outputs, 
+                y, 
+                self.hparams.dataset_info.class_names,
+                self.hparams.cfg,
+            )
+            outputs_softmax = outputs.softmax(1)
+            fused_outputs = outputs_proto * self.hparams.cfg.fusion_lambda + outputs_softmax * (1 - self.hparams.cfg.fusion_lambda)
+            loss = torch.tensor(0.0, device=self.device)
+            
+        return fused_outputs.cpu(), to_logs, loss
 
-	# @torch.no_grad()
-	def _update_classifier_proto(self, feature, y, classifier_proto, classifier_proto_exists_flag, rho=None):
-		"""Update the prototype of the classifier.
-		Args:
-			feature: [B, CH, H, W]
-			y: [B, H, W]
-		Returns:
-			proto: [C, CH]
-		"""
-		# clone classifier proto and exists flag
-		classifier_proto, classifier_proto_exists_flag = classifier_proto.clone(), classifier_proto_exists_flag.clone()
-		# calculate mean of each class
-		""" Update prototype for each class
-		At first, we need to calculate the mean of each class and numbers of pixels of each class.
-		Then, we can update the prototype of each class by total ratio.
-		Args:
-			feature: [B, C, H, W]
-			y: [B, H, W]
-		"""
-		# calculate mean of each class
-		proto, with_flag = self.cal_proto(feature, y)
-		# update (set for the first time, update for the rest) 
-		for i in range(self.hparams.dataset_info["num_classes"]):
-			if not with_flag[i] or rho == 0: continue
-			if classifier_proto_exists_flag[i] == 0:
-				classifier_proto[i] = proto[i]
-				classifier_proto_exists_flag[i] = 1
-			else:
-				# Adjust rho based on calculation count
-				count = self.class_calculation_count[i]
-				# Find the position in thresholds array
-				pos = torch.sum(count > self.calculation_thresholds)
-				adjusted_rho = 0.5 - (pos * 0.1)  # Start from 0.5 and decrease by 0.1 for each threshold
-				adjusted_rho = max(adjusted_rho, 0.1)  # Ensure minimum rho is 0.1
-				classifier_proto[i] = (1-adjusted_rho) * classifier_proto[i] + adjusted_rho * proto[i]
-				self.class_calculation_count[i] += 1
-		return classifier_proto, classifier_proto_exists_flag 
+    def test_epoch_end(self, outputs: List[Any]): 
+        stats = self._calculate_overall_statistics()
+        self._print_statistics(stats)
+        
+        test_accs = [test_acc.compute() for test_acc in self.test_acc]
+        acc_mean = sum(test_accs) / len(test_accs)
+        self.log("test/acc/mean", acc_mean, on_step=False, on_epoch=True, prog_bar=True)
+        for i in range(len(test_accs)): # log accs of each dataset in val list
+            self.log(f"test/acc/dataloaderr_idx_{str(i)}", test_accs[i], on_epoch=True, prog_bar=True)
+            self.log(f"test/acc/dataloaderr16_idx_{str(i)}", self.test_acc[i].compute_iou(type="16"), on_epoch=True, prog_bar=True)
+            self.log(f"test/acc/dataloaderr13_idx_{str(i)}", self.test_acc[i].compute_iou(type="13"), on_epoch=True, prog_bar=True)
+            # use wandb logger to log 
+            class_iou = self.test_acc[i].compute_class_iou()
+            class_names = self.hparams.dataset_info.class_names
+            self.wandb.log_table(key=f"test/class_iou/dataloaderr_idx_{str(i)}", columns=list(class_names), data=[class_iou])
+        for i, test_acc in enumerate(self.test_acc): # reset
+            test_acc.reset()
+        
+    def _update_statistics(self, above_threshold: int, total_pixels: int):
+        """Update statistics for a single image.
+        
+        Args:
+            above_threshold: Number of pixels above confidence threshold
+            total_pixels: Total number of pixels in the image
+        """
+        self.confident_pixels_per_image.append(above_threshold)
+        self.total_pixels_per_image.append(total_pixels)
+        self.image_indices.append(len(self.image_indices))
+        
+    def _calculate_overall_statistics(self) -> dict:
+        """Calculate and return overall statistics.
+        
+        Returns:
+            Dictionary containing overall statistics
+        """
+        total_confident = sum(self.confident_pixels_per_image)
+        total_pixels = sum(self.total_pixels_per_image)
+        avg_percentage = total_confident / total_pixels * 100
+        
+        return {
+            'total_images': len(self.image_indices),
+            'avg_confident_pixels': total_confident/len(self.image_indices),
+            'avg_percentage': avg_percentage
+        }
+        
+    def _print_statistics(self, stats: dict):
+        """Print statistics in a formatted way.
+        
+        Args:
+            stats: Dictionary containing statistics to print
+        """
+        print(f"\nOverall Statistics:")
+        print(f"Total number of images: {stats['total_images']}")
+        print(f"Average confident pixels per image: {stats['avg_confident_pixels']:.0f}")
+        print(f"Average percentage of confident pixels: {stats['avg_percentage']:.2f}%")
 
-	# @torch.no_grad()
-	def proto_weight(self, proto, feature, tau=1.0):
-		""" Calculate the weight for classes of each pixel.
-		For each pixel, we calculate the distance between the prototype of each class and the feature of the pixel.
-		Then, we calculate the weight of each class by softmax with temperature tau.
-		Args:
-			protos: [C, CH]
-			feature: [B, CH, H, W]
-			tau: temperature
-		Returns:
-			weight: [B, C, H, W]
-		"""
-		# calculate distance
-		# [B, C, CH, H, W]
-		proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-		feature = feature.unsqueeze(1)
-		dist = torch.norm(proto - feature, dim=2)
-		# dist = self.fidelity(feature, proto)
-		# calculate weight
-		weight = torch.softmax(-dist / tau, dim=1)
-		return weight
+    def high_confident_proto_label(self, outputs, threshold, number_of_prototypes):
+        """High confident pseudo label.
+        For each pixel, output the max prob class if max_prob > bar, else 255
+        
+        Args:
+            outputs: (B, C, H, W), logits
+            bar: float, threshold
+            class_balance: bool, if True, use class balance to select the max prob class
+            ground_truth: (B, H, W), ground truth label
+        Returns:
+            pseudo_label: (B, H, W)
+        """
+        outputs = outputs.softmax(dim=1)
+        pseudo_label = outputs.argmax(dim=1)
+        
+        max_probs, max_probs_class = outputs.max(dim=1)
+        
+        # Calculate number of pixels to keep per images
+        total_pixels_per_image = max_probs[0].numel()
+        k_pixels = int(total_pixels_per_image * number_of_prototypes)
+        
+        confident_mask = torch.zeros_like(max_probs, dtype=torch.bool)
+        
+        # Process each image in the batch for top-k pixels
+        for i in range(max_probs.shape[0]):
+            flat_probs = max_probs[i].flatten()
+            # Get indices of top k pixels
+            _, top_indices = torch.topk(flat_probs, k_pixels)
+            
+            # Create mask for this image
+            img_mask = torch.zeros_like(flat_probs, dtype=torch.bool)
+            img_mask[top_indices] = True
+            
+            confident_mask[i] = img_mask.reshape(max_probs[i].shape)
+            
+            for c in range(self.hparams.dataset_info["num_classes"]):
+                class_mask = (max_probs_class[i] == c)
+                if class_mask.sum() > 0:
+                    class_probs = max_probs[i][class_mask]
+                    confident_mask[i][class_mask] &= (class_probs > self.class_medians[c])
+                    
+                    above_median = (class_probs > self.class_medians[c]).sum().item()
+                    total_class_pixels = class_mask.sum().item()
+                    
+        # Process confident pixels for smaller than threshold
+        # confident_mask = confident_mask & (max_probs > threshold)
 
-	def cal_proto(self, feature, y):
-		""" Calculate the prototype of each class with the given feature and label.
-		Args:
-			feature: [B, C, H, W]
-			y: [B, H, W]
-		Returns:
-			proto: [C, C] # prototype of each class
-			with_flag: [C] # whether the class has pixels
-		"""
-		proto = torch.zeros(self.hparams.dataset_info["num_classes"], feature.shape[1]).to(self.device)
-		with_flag = torch.zeros(self.hparams.dataset_info["num_classes"]).to(self.device)
-		for i in range(self.hparams.dataset_info["num_classes"]):
-			masks = (y == i).flatten()
-			if masks.sum() == 0:
-				continue
-			with_flag[i] = 1
-			proto[i] = feature.permute((1, 0, 2, 3)).flatten(1).permute((1,0))[masks].mean(0)
-		return proto, with_flag
-	
-	def _replace_bn(self):
-		"""
-		Replace all BN layers with new class for DIGA
-		"""
-		def get_layer(model, name):
-			layer = model
-			for attr in name.split("."):
-				layer = getattr(layer, attr)
-			return layer
-		def set_layer(model, name, layer):
-			try:
-				attrs, name = name.rsplit(".", 1)
-				model = get_layer(model, attrs)
-			except ValueError:
-				pass
-			setattr(model, name, layer)
-		# use replace all batch norm module m in self.net with custom batch norm module
-		for n, module in self.net.named_modules():
-			if isinstance(module, nn.BatchNorm2d):
-				set_layer(self.net, n, SIFABatchNorm2d().from_bn(module).to(self.device))
+        # Update statistics
+        above_threshold = confident_mask.sum().item()
+        total_pixels = confident_mask.numel()
+        self._update_statistics(above_threshold, total_pixels)
+        
+        pseudo_label[~confident_mask] = 255
+        pseudo_unique = pseudo_label.unique()
+        not_confident_percentage = (total_pixels - above_threshold) / total_pixels * 100
+        
+        return pseudo_label
+    
+    def multi_proto_label(self, feature, outputs, y, class_names, cfg):
+        """ Calculate label for each pixel based on multiple prototypes of each class
+        Args:
+            feature: (B, CH, H, W), feature map
+            outputs: (B, C, H, W), logits
+            y: (B, H, W), ground truth
+            class_names: list of class names
+            cfg: dict, config for multi_proto_label
+                strategy: str. values can be "mean_and_instance", "two_proto_per_class", ...
+                reduce_method: str. values can be "best", "weighted_sum", ...
+                lambda_: float. weight for mean prototypes in "weighted_sum" reduce_method
+                rho: float. weight for instance prototypes when update mean prototypes
+        Returns:
+            prediction: (B, H, W), prediction for each pixel
+
+        """
+        multi_pred, to_logs = None, {}
+        # y = F.interpolate(y.unsqueeze(1).float(), size=outputs.shape[2:], mode="nearest").squeeze(1).long()
+        proto_label = self.high_confident_proto_label(
+            outputs, 
+            threshold=cfg.confidence_threshold, 
+            number_of_prototypes=cfg.number_of_prototypes
+        )
+        proto, exists_flag = self.cal_proto(feature, proto_label)
+        # init or update mean prototypes
+        if not hasattr(self, "classifier_running_proto"):
+            self.classifier_running_proto, self.classifier_running_proto_exists_flag = proto, exists_flag
+        else:
+            self.classifier_running_proto, self.classifier_running_proto_exists_flag = self._update_classifier_proto(feature, proto_label, self.classifier_running_proto, self.classifier_running_proto_exists_flag, cfg.proto_rho)
+        # make prediction
+        instance_pred = self.cal_pred_of_proto(feature, proto, exists_flag)
+        mean_pred = self.cal_pred_of_proto(feature, self.classifier_running_proto, self.classifier_running_proto_exists_flag)
+        multi_pred = cfg.proto_lambda * mean_pred + (1-cfg.proto_lambda) * instance_pred
+        return multi_pred, to_logs
+    
+    def cal_pred_of_proto(self, feature, proto, exists_flag, tau=2.0):
+        """ Calculate the weight for classes of each pixel.
+        For each pixel, we calculate the distance between the prototype of each class and the feature of the pixel.
+        Then, we calculate the weight of each class by softmax with temperature tau.
+        Note that we only calculate the weight of the classes that have prototypes, for other classes, the weight
+        should be 0.
+        Args:
+            feature: [B, CH, H, W]
+            proto: [C, CH]
+            exists_flag: [C]
+            tau: temperature
+        Returns:
+            weight: [B, C, H, W]
+        """
+        # calculate distance
+        feature = feature.unsqueeze(1) # [B, 1, CH, H, W]
+        proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [1, C, CH, 1, 1]
+        # feature_norm = feature / (feature.norm(dim=2, keepdim=True) + 1e-8)
+        # proto_norm = proto / (proto.norm(dim=2, keepdim=True) + 1e-8)
+        # cos_sim = torch.sum(feature_norm * proto_norm, dim=2)
+        # dist = 1 - cos_sim
+        dist = torch.norm(proto - feature, dim=2) # [B, C, H, W]
+        # calculate weight by softmax
+        weight = torch.exp(-dist / tau) # [B, C, H, W]
+        weight = weight * exists_flag.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # [B, C, H, W]
+        weight = weight / torch.sum(weight, dim=1, keepdim=True) # [B, C, H, W]
+        return weight
+
+    # @torch.no_grad()
+    def _update_classifier_proto(self, feature, y, classifier_proto, classifier_proto_exists_flag, rho=None):
+        """Update the prototype of the classifier.
+        Args:
+            feature: [B, CH, H, W]
+            y: [B, H, W]
+        Returns:
+            proto: [C, CH]
+        """
+        # clone classifier proto and exists flag
+        classifier_proto, classifier_proto_exists_flag = classifier_proto.clone(), classifier_proto_exists_flag.clone()
+        # calculate mean of each class
+        """ Update prototype for each class
+        At first, we need to calculate the mean of each class and numbers of pixels of each class.
+        Then, we can update the prototype of each class by total ratio.
+        Args:
+            feature: [B, C, H, W]
+            y: [B, H, W]
+        """
+        # calculate mean of each class
+        proto, with_flag = self.cal_proto(feature, y)
+        # update (set for the first time, update for the rest) 
+        for i in range(self.hparams.dataset_info["num_classes"]):
+            if not with_flag[i] or rho == 0: continue
+            if classifier_proto_exists_flag[i] == 0:
+                classifier_proto[i] = proto[i]
+                classifier_proto_exists_flag[i] = 1
+            else:
+                # Adjust rho based on calculation count
+                count = self.class_calculation_count[i]
+                # Find the position in thresholds array
+                pos = torch.sum(count > self.calculation_thresholds)
+                adjusted_rho = 0.5 - (pos * 0.1)  # Start from 0.5 and decrease by 0.1 for each threshold
+                adjusted_rho = max(adjusted_rho, 0.1)  # Ensure minimum rho is 0.1
+                classifier_proto[i] = (1-adjusted_rho) * classifier_proto[i] + adjusted_rho * proto[i]
+                self.class_calculation_count[i] += 1
+        return classifier_proto, classifier_proto_exists_flag 
+
+    # @torch.no_grad()
+    def proto_weight(self, proto, feature, tau=1.0):
+        """ Calculate the weight for classes of each pixel.
+        For each pixel, we calculate the distance between the prototype of each class and the feature of the pixel.
+        Then, we calculate the weight of each class by softmax with temperature tau.
+        Args:
+            protos: [C, CH]
+            feature: [B, CH, H, W]
+            tau: temperature
+        Returns:
+            weight: [B, C, H, W]
+        """
+        # calculate distance
+        # [B, C, CH, H, W]
+        proto = proto.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        feature = feature.unsqueeze(1)
+        dist = torch.norm(proto - feature, dim=2)
+        # dist = self.fidelity(feature, proto)
+        # calculate weight
+        weight = torch.softmax(-dist / tau, dim=1)
+        return weight
+
+    def cal_proto(self, feature, y):
+        """ Calculate the prototype of each class with the given feature and label.
+        Args:
+            feature: [B, C, H, W]
+            y: [B, H, W]
+        Returns:
+            proto: [C, C] # prototype of each class
+            with_flag: [C] # whether the class has pixels
+        """
+        proto = torch.zeros(self.hparams.dataset_info["num_classes"], feature.shape[1]).to(self.device)
+        with_flag = torch.zeros(self.hparams.dataset_info["num_classes"]).to(self.device)
+        for i in range(self.hparams.dataset_info["num_classes"]):
+            masks = (y == i).flatten()
+            if masks.sum() == 0:
+                continue
+            with_flag[i] = 1
+            proto[i] = feature.permute((1, 0, 2, 3)).flatten(1).permute((1,0))[masks].mean(0)
+        return proto, with_flag
+    
+    def _replace_bn(self):
+        """
+        Replace all BN layers with new class for DIGA
+        """
+        def get_layer(model, name):
+            layer = model
+            for attr in name.split("."):
+                layer = getattr(layer, attr)
+            return layer
+        def set_layer(model, name, layer):
+            try:
+                attrs, name = name.rsplit(".", 1)
+                model = get_layer(model, attrs)
+            except ValueError:
+                pass
+            setattr(model, name, layer)
+        # use replace all batch norm module m in self.net with custom batch norm module
+        for n, module in self.net.named_modules():
+            if isinstance(module, nn.BatchNorm2d):
+                set_layer(self.net, n, SIFABatchNorm2d().from_bn(module).to(self.device))
    
-	def _configure_bn_running_stats(self):
-		for param in self.net.parameters():
-			param.requires_grad = False
-		
-		for m in self.net.modules():
-			if isinstance(m, SIFABatchNorm2d):
-				m.lambda_.data = torch.tensor(self.hparams.cfg.bn_lambda)
-				m.memory_bank_size = self.hparams.cfg.memory_bank_size
-				m.track_running_stats = False
-				m.weight.requires_grad = True
-				m.bias.requires_grad = True
-	
-	def _load_class_medians(self):
-		"""Load class medians from JSON file."""
-		try:
-			file_path = os.path.join(os.path.dirname(__file__), 'class_medians.json')
-			if os.path.exists(file_path):
-				with open(file_path, 'r') as f:
-					data = json.load(f)
-					medians = data['class_medians']
-				print(f"Successfully loaded class medians from {file_path}")
-			   
-				medians = [min(0.9, m) for m in medians]
-				return torch.tensor(medians, device=self.device)
-			else:
-				raise FileNotFoundError(f"class_medians.json not found at {file_path}")
-		except FileNotFoundError as e:
-			print(f"Warning: {str(e)}. Using default threshold.")
-			return torch.ones(self.hparams.dataset_info["num_classes"], device=self.device) * 0.9
-				
-	# others
-	@property
-	def wandb(self):
-		for lg in self.loggers: 
-			if "wandb" in lg.__module__:
-				return lg
-		raise ValueError("No wandb logger found")
+    def _configure_bn_running_stats(self):
+        for param in self.net.parameters():
+            param.requires_grad = False
+        
+        for m in self.net.modules():
+            if isinstance(m, SIFABatchNorm2d):
+                m.lambda_.data = torch.tensor(self.hparams.cfg.bn_lambda)
+                m.memory_bank_size = self.hparams.cfg.memory_bank_size
+                m.track_running_stats = False
+                m.weight.requires_grad = True
+                m.bias.requires_grad = True
+    
+    def _load_class_medians(self):
+        """Load class medians from JSON file."""
+        try:
+            file_path = os.path.join(os.path.dirname(__file__), 'class_medians.json')
+            if os.path.exists(file_path):
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    medians = data['class_medians']
+                print(f"Successfully loaded class medians from {file_path}")
+               
+                medians = [min(0.9, m) for m in medians]
+                return torch.tensor(medians, device=self.device)
+            else:
+                raise FileNotFoundError(f"class_medians.json not found at {file_path}")
+        except FileNotFoundError as e:
+            print(f"Warning: {str(e)}. Using default threshold.")
+            return torch.ones(self.hparams.dataset_info["num_classes"], device=self.device) * 0.9
+                
+    # others
+    @property
+    def wandb(self):
+        for lg in self.loggers: 
+            if "wandb" in lg.__module__:
+                return lg
+        raise ValueError("No wandb logger found")
 
 if __name__ == "__main__":
-	import hydra
-	import omegaconf
-	import pyrootutils
+    import hydra
+    import omegaconf
+    import pyrootutils
 
-	root = pyrootutils.setup_root(__file__, pythonpath=True)
-	cfg = omegaconf.OmegaConf.load(root / "configs" / "model" / "mnist.yaml")
-	_ = hydra.utils.instantiate(cfg)
+    root = pyrootutils.setup_root(__file__, pythonpath=True)
+    cfg = omegaconf.OmegaConf.load(root / "configs" / "model" / "mnist.yaml")
+    _ = hydra.utils.instantiate(cfg)

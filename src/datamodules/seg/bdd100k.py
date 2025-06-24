@@ -275,7 +275,7 @@ class BDD100KDataSet(BaseDataset):
             w, h = h, w  # Swap dimensions
         
         # Calculate target dimensions maintaining aspect ratio
-        target_w = 1280  # Fixed width
+        target_w = 1024  # Fixed width
         target_h = int(h * (target_w / w))
         
         # Ensure height is divisible by 32
